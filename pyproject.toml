@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "advista-agent"
+version = "0.1.0"
+description = "Evidence-grounded multimodal advertising video agent"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "pydantic>=2.10,<3",
+  "scenedetect[opencv]>=0.6.6,<0.7",
+  "PyYAML>=6,<7",
+  "typer>=0.15,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+benchmark = ["aiohttp>=3.10,<4"]
+web = []
+
+[project.scripts]
+advista-agent = "ad_vista_agent.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["ad_vista_agent*"]
+
+[tool.setuptools.package-data]
+ad_vista_agent = ["resources/*.yaml", "resources/*.txt", "web/static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

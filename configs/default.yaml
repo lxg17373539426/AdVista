@@ -1,0 +1,88 @@
+project:
+  name: advista-insight-agent
+  schema_version: "0.1"
+
+paths:
+  model_root: models
+  video_data: data/videos
+  output_root: outputs
+
+hardware:
+  cuda_visible_devices: "0"
+  max_gpus: 1
+
+models:
+  qwen: Qwen3.5-9B-GSPO-Step300-Merged
+  asr: faster-whisper-large-v3-turbo-ct2
+  ocr: DeepSeek-OCR
+
+tools:
+  ffmpeg_executable: ffmpeg
+  ffprobe_executable: ffprobe
+  probe_timeout_seconds: 30
+  frame_extract_timeout_seconds: 60
+
+timeline:
+  detector: pyscenedetect_content
+  scene_threshold: 27.0
+  min_shot_ms: 500
+  frame_format: jpg
+  jpeg_quality: 2
+
+asr:
+  python_executable: .venv-asr/bin/python
+  model: faster-whisper-large-v3-turbo-ct2
+  device: cuda
+  device_index: 0
+  compute_type: float16
+  beam_size: 5
+  vad_filter: true
+  condition_on_previous_text: false
+  word_timestamps: true
+  merge_gap_ms: 500
+  timeout_seconds: 600
+
+ocr:
+  deepseek_python: .venv-ocr/bin/python
+  paddle_python: .venv-ocr/bin/python
+  model: DeepSeek-OCR
+  primary: deepseek_ocr
+  fallback: paddleocr
+  prompt: "<image>\n<|grounding|>Convert the image to markdown."
+  base_size: 1024
+  image_size: 640
+  crop_mode: true
+  timeout_seconds: 1800
+  paddle_score_threshold: 0.5
+
+ledger:
+  ocr_similarity_threshold: 0.92
+  ocr_max_gap_ms: 2500
+  ocr_min_region_iou: 0.5
+  cross_modal_similarity_threshold: 0.8
+  cross_modal_window_ms: 1500
+  conflict_context_similarity_threshold: 0.8
+
+insight:
+  python_executable: .venv-vllm/bin/python
+  model: Qwen3.5-9B-GSPO-Step300-Merged
+  runtime: openai
+  endpoint: http://127.0.0.1:8000/v1
+  served_model: AdInsight-RL
+  max_model_len: 8192
+  max_tokens: 4096
+  gpu_memory_utilization: 0.8
+  temperature: 0.0
+  timeout_seconds: 900
+  max_insights_per_dimension: 5
+
+report:
+  max_evidence_per_insight: 4
+  embed_images: true
+  max_embedded_image_bytes: 500000
+
+web:
+  host: 127.0.0.1
+  port: 8080
+  max_upload_bytes: 1073741824
+  analysis_workers: 1

@@ -1,0 +1,8 @@
+transformers==4.46.3
+tokenizers==0.20.3
+einops==0.8.1
+addict==2.4.0
+easydict==1.13
+tqdm==4.67.1
+safetensors==0.8.0
+accelerate==1.14.0
