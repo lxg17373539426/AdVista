@@ -15,11 +15,6 @@ dependencies = [
   "typer>=0.15,<1",
 ]
 
-[project.optional-dependencies]
-dev = ["pytest>=8,<9"]
-benchmark = ["aiohttp>=3.10,<4"]
-web = []
-
 [project.scripts]
 advista-agent = "ad_vista_agent.cli:app"
 
@@ -28,6 +23,3 @@ include = ["ad_vista_agent*"]
 
 [tool.setuptools.package-data]
 ad_vista_agent = ["resources/*.yaml", "resources/*.txt", "web/static/*"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]

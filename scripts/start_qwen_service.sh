@@ -10,4 +10,4 @@ export QWEN_DTYPE="bfloat16"
 export QWEN_MAX_IMAGES_PER_PROMPT="8"
 unset QWEN_QUANTIZATION
 
-exec bash "$(dirname "$0")/start_qwen_benchmark_server.sh"
+exec bash "$(dirname "$0")/start_qwen_server.sh"

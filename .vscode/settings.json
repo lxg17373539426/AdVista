@@ -1,9 +1,0 @@
-{
-  "remote.autoForwardPorts": true,
-  "remote.portsAttributes": {
-    "8080": {
-      "label": "AdVista Web",
-      "onAutoForward": "silent"
-    }
-  }
-}

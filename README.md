@@ -1,125 +1,98 @@
 # AdVista Insight Agent
 
-AdVista Insight Agent is an evidence-grounded multimodal agent for advertising-video understanding and marketing decision support. It turns a local video into timestamped speech and OCR evidence, a unified Evidence Ledger, citation-validated insights, risk audits, reports, and creative deliverables.
+AdVista Insight Agent 是一个用于广告视频理解和营销分析的多模态 Agent。它可以从本地广告视频中提取语音、画面文字和时间线证据，并生成广告洞察、风险审计、分析报告以及创意方案。
 
-This repository contains the application code and tests. Model weights, uploaded videos, generated reports, databases, logs, and other runtime artifacts are intentionally not stored in Git.
+## 使用的模型
 
-Design document: [`docs/PROJECT_PLAN.zh-CN.md`](docs/PROJECT_PLAN.zh-CN.md)
+- **AdInsight-RL**：项目的核心推理、规划、报告和创意生成模型。
+  - 模型地址：https://www.modelscope.cn/models/luxiaoguo123/AdInsight-RL
+- **Faster-Whisper**：提取广告视频中的语音和字幕信息。
+- **DeepSeek-OCR**：提取视频画面中的文字信息。
+- **PaddleOCR**：DeepSeek-OCR 不可用时的 OCR 备用方案。
+- **PySceneDetect**：检测视频镜头和场景切换。
 
-## Features
+模型权重不会上传到 GitHub，需要在本地单独下载。
 
-- Deterministic video ingestion, shot detection, keyframe extraction, and artifact caching.
-- Timestamped Faster-Whisper speech evidence.
-- Grounded DeepSeek-OCR evidence with PaddleOCR fallback.
-- A unified Evidence Ledger for cross-modal grounding and conflict tracking.
-- AdInsight-RL planning, structured advertising insights, critique, and multi-turn chat.
-- Explicit deliverables: evidence, insights, risk audit, report, and creative package.
-- Local Web workspace with upload, progress, timeline, chat, and export support.
+## 安装
 
-## Models
-
-- **AdInsight-RL**: the RL-trained model used for planning, reasoning, critique, and deliverables. Download it from [ModelScope](https://www.modelscope.cn/models/luxiaoguo123/AdInsight-RL). The weights are not included in this repository.
-- **Faster-Whisper**: timestamped speech recognition. Install with [`requirements/asr.txt`](requirements/asr.txt).
-- **DeepSeek-OCR**: OCR with PaddleOCR fallback. See [`requirements/deepseek-ocr.txt`](requirements/deepseek-ocr.txt).
-
-The default configuration expects the RL checkpoint at `models/Qwen3.5-9B-GSPO-Step300-Merged`. Any local paths can be changed in the ignored `configs/local.yaml` file.
-
-## Status
-
-Stage 1 implements deterministic video ingestion. Stage 2 adds a normalized shot timeline and primary keyframes. Stage 3 adds timestamped Faster-Whisper speech evidence. Stage 4 adds grounded DeepSeek-OCR evidence with PaddleOCR fallback. Stage 5 builds a deterministic unified Evidence Ledger. Stage 6 uses Qwen3.5-9B to generate citation-validated structured advertising insights. Stage 7 audits accepted insights and generates Markdown/HTML deliverables. Stage 8 provides persistent fixed-pipeline orchestration and recovery. Stage 9 adds the first bounded Agent Core with goal-driven Qwen planning, local plan compilation, validated tool selection, observations, reflection, budgets, recovery, and human gates. Stage 10 adds SQLite-backed multi-turn conversations, answer versions, feedback, and citation-guarded follow-up questions over existing artifacts without rerunning ASR or OCR. Stage 11 adds citation-guarded Hooks, scripts, storyboards, and A/B creative variants. See [`docs/STAGE_11.md`](docs/STAGE_11.md), [`docs/STAGE_10.md`](docs/STAGE_10.md), and [`docs/STAGE_9.md`](docs/STAGE_9.md).
-
-This repository is a research prototype. Keep the Web server bound to `127.0.0.1`; it does not provide production authentication or tenant isolation.
-
-## Requirements
-
-- Linux with Python 3.11-3.13.
-- FFmpeg and ffprobe available on `PATH`.
-- An NVIDIA GPU and compatible CUDA stack for the default ASR, OCR, and vLLM configuration.
-- AdInsight-RL downloaded outside Git, for example to `models/Qwen3.5-9B-GSPO-Step300-Merged`.
-- `modelscope` if downloading the model from ModelScope with the command below.
-
-## Installation
+建议使用 Linux、Python 3.11-3.13 和 NVIDIA GPU。
 
 ```bash
+cd AdVista
 python -m venv .venv
 .venv/bin/python -m pip install -e .
 python -m venv .venv-asr
 .venv-asr/bin/python -m pip install -r requirements/asr.txt
-.venv/bin/python -m pip install modelscope
 ```
 
-Download the RL model to a directory outside Git, or use the repository-local `models/` directory, which is ignored:
+下载 AdInsight-RL：
 
 ```bash
+.venv/bin/python -m pip install modelscope
 .venv/bin/python -c "from modelscope import snapshot_download; snapshot_download('luxiaoguo123/AdInsight-RL', local_dir='models/Qwen3.5-9B-GSPO-Step300-Merged')"
 ```
 
-Create the machine-specific configuration and update its paths:
+同时需要系统中安装 `ffmpeg` 和 `ffprobe`，并准备 OCR、vLLM 所需的运行环境。
+
+## 启动
+
+### 1. 配置模型路径
 
 ```bash
 cp configs/default.yaml configs/local.yaml
-# Edit configs/local.yaml: model_root, video_data, and interpreter paths.
-.venv/bin/advista-agent doctor --config configs/local.yaml
 ```
 
-## Command-Line Usage
+编辑 `configs/local.yaml`，至少确认以下路径：
 
-```bash
-.venv/bin/advista-agent ingest /path/to/ad.mp4
-.venv/bin/advista-agent timeline /path/to/ad.mp4
-.venv/bin/advista-agent speech /path/to/ad.mp4
-.venv/bin/advista-agent ocr /path/to/ad.mp4
-.venv/bin/advista-agent ledger /path/to/ad.mp4
-.venv/bin/advista-agent insights /path/to/ad.mp4
-.venv/bin/advista-agent report /path/to/ad.mp4
-.venv/bin/advista-agent run /path/to/ad.mp4
-.venv/bin/advista-agent agent-plan --goal "只提取字幕和语音证据" --deliverable evidence --qwen
-.venv/bin/advista-agent agent /path/to/ad.mp4 --goal "分析卖点、受众和风险并生成报告" --qwen-planner
-.venv/bin/advista-agent agent-resume ingest_<asset-hash> --approve
-.venv/bin/advista-agent chat ingest_<asset-hash> "这个广告最核心的卖点是什么？"
-.venv/bin/advista-agent creative /path/to/ad.mp4
-.venv/bin/advista-agent serve --config configs/local.yaml
-.venv/bin/advista-agent session-show ingest_<asset-hash>
-.venv/bin/advista-agent feedback ingest_<asset-hash> approve "回答边界清晰" --message-id msg_<id>
-.venv/bin/advista-agent resume ingest_<asset-hash> --approve-review
-.venv/bin/advista-agent clean
-.venv/bin/python -m unittest discover -s tests -v
+```yaml
+paths:
+  model_root: /path/to/models
+  video_data: /path/to/videos
+  output_root: /path/to/outputs
 ```
 
-`configs/local.yaml` is ignored by Git. Commands without `--config` use portable packaged defaults, while production deployments should use a local configuration with paths appropriate for the machine.
+根据本机环境修改 ASR、OCR 和 vLLM 的 Python 路径。`configs/local.yaml` 不会上传到 GitHub。
 
-Start the persistent Qwen service before `doctor`, `insights`, or the complete `run` command:
+### 2. 启动 AdInsight-RL 服务
 
 ```bash
 export QWEN_MODEL_PATH=/path/to/Qwen3.5-9B-GSPO-Step300-Merged
-export QWEN_VIDEO_DIR=/path/to/allowed/video/directory
-export QWEN_PYTHON=/path/to/vllm/python
-bash scripts/start_qwen_service.sh
+export QWEN_VIDEO_DIR=/path/to/videos
+export QWEN_PYTHON=/path/to/vllm/bin/python
+bash scripts/start_qwen_server.sh
 ```
 
-Open `http://127.0.0.1:8080` after starting the Web service. VS Code Remote users can forward port `8080` from the Ports panel.
-
-The Web server is intentionally bound to `127.0.0.1` and has no production authentication or tenant isolation. Do not expose it directly to the public internet.
-
-The Web composer `+` menu can attach a video and explicitly select Evidence, Insights, Risk Audit, Report, or Creative deliverables. If no deliverable is selected, AdInsight-RL infers the requested deliverables from the user's natural-language goal. Explicit selections are authoritative and the Agent executes only their minimum dependency closure.
-
-`run` persists orchestration state in `outputs/runs/<run-id>/orchestration/state.json`. A failed run can be continued with `resume <run-id>`. A Critic `review` result pauses delivery until `--approve-review` is supplied; approval is recorded without altering the audit.
-
-Qwen Stage 6 uses the configured persistent OpenAI-compatible vLLM service by default. Inference optimization reports: [中文报告](docs/INFERENCE_OPTIMIZATION.zh-CN.md) | [English report](docs/INFERENCE_OPTIMIZATION.md).
-
-Stage 12 adds a local Web workspace for upload, progress, timeline inspection, chat, and exports. See [`docs/STAGE_12.md`](docs/STAGE_12.md).
-
-## Development
-
-Run the test suite after installing the development extra:
+### 3. 启动 Web 页面
 
 ```bash
-python -m pip install -e ".[dev]"
-python -m pytest
+.venv/bin/advista-agent serve --config configs/local.yaml
 ```
 
-The current test suite contains 103 tests. The default test suite does not require downloading model weights or processing a real advertisement video.
+浏览器打开：
 
-## License
+```text
+http://127.0.0.1:8080
+```
 
-No license has been selected for this repository yet. Until a `LICENSE` file is added, all rights are reserved by the copyright holder.
+如果使用 VSCode Remote SSH，可以在 VSCode 的 `PORTS` 面板转发 `8080` 端口，然后点击 `Open in Browser`。
+
+## 命令行运行
+
+```bash
+.venv/bin/advista-agent agent /path/to/ad.mp4 \
+  --goal "分析广告卖点、受众、风险并生成报告" \
+  --qwen-planner \
+  --config configs/local.yaml
+```
+
+也可以直接运行完整流程：
+
+```bash
+.venv/bin/advista-agent run /path/to/ad.mp4 --config configs/local.yaml
+```
+
+运行结果保存在 `outputs/` 目录中。视频、模型权重和运行结果默认不会提交到 GitHub。
+
+## 注意
+
+Web 服务默认只监听本机地址 `127.0.0.1`，不建议直接暴露到公网。
