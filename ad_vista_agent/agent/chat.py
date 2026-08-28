@@ -324,7 +324,7 @@ def _workspace_answer(
         lines.append(f"暂停原因：{reason}，确认前不会继续执行后续步骤。")
     if available:
         lines.append("当前已生成：" + "、".join(available) + "。")
-        lines.append("可在右上角“查看结果”中查看或下载。")
+        lines.append("下载链接会直接显示在当前对话中。")
     else:
         lines.append("当前还没有可下载的分析产物。")
     return ConversationAnswer(
@@ -573,7 +573,7 @@ def ask_agent(
         answer = ConversationAnswer(
             answer=(
                 f"HTML 广告分析报告已生成：{result['insight_count']} 条洞察，"
-                "点击下方按钮即可下载。Markdown 版本也可在“查看结果”中下载。"
+                "点击下方按钮即可下载 HTML 或 Markdown 版本。"
             ),
             epistemic_status="conversational",
         )

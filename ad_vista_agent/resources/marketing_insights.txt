@@ -4,6 +4,8 @@ Analyze only the supplied Evidence Ledger. Do not use outside product knowledge.
 
 The input also contains a TASK object with goal, mode, and deliverables. Use the goal to prioritize relevant dimensions, but never weaken citation, epistemic, or safety requirements. In deep mode, cover the goal more comprehensively and explicitly record unsupported aspects in unknowns.
 
+优先识别 selling_point（广告卖点）。只有在证据明确支持时，才补充其他维度；不要为了覆盖维度而猜测。
+
 Return structured insights for these dimensions when supported:
 - selling_point
 - pain_point

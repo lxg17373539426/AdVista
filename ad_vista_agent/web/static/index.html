@@ -25,7 +25,7 @@
       <header class="header">
         <button id="menu" class="icon-button menu-button" type="button" aria-label="打开任务导航">☰</button>
         <div><strong id="header-title">AdVista</strong><small id="header-subtitle">通用助手与广告视频分析</small></div>
-        <div class="header-actions"><button id="artifacts-button" class="ghost hidden">查看结果</button><button id="refresh" class="icon-button" title="刷新">↻</button></div>
+        <div class="header-actions"><button id="refresh" class="icon-button" title="刷新">↻</button></div>
       </header>
 
       <section id="conversation" class="conversation">
@@ -39,11 +39,6 @@
         <div id="boot-error" class="error-text hidden" role="alert"></div>
       </section>
 
-      <section id="artifacts" class="artifacts hidden">
-        <div class="artifact-tabs"><button class="artifact-tab active" data-tab="overview">概览</button><button class="artifact-tab" data-tab="timeline">时间轴</button><button class="artifact-tab" data-tab="exports">导出</button><button id="close-artifacts" class="close-button">×</button></div>
-        <div id="artifact-content" class="artifact-content"></div>
-      </section>
-
       <div class="composer-wrap">
         <form id="prompt-form" class="composer">
           <div id="attachment" class="attachment hidden"><span id="attachment-name"></span><button type="button" id="remove-attachment">×</button></div>
@@ -54,12 +49,11 @@
               <div id="composer-menu" class="composer-menu hidden">
                 <label class="menu-upload"><input id="video" name="video" type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm"><span><strong>附加广告视频</strong><small>MP4、MOV、MKV 或 WebM</small></span></label>
                 <div class="menu-divider"></div>
-                <div class="deliverable-heading"><strong>生成内容</strong><small>不选择时由 AdInsight-RL 自动判断</small></div>
-                <label class="deliverable-option"><input type="checkbox" value="evidence"><span><strong>证据账本</strong><small>字幕、语音和 OCR 证据</small></span></label>
-                <label class="deliverable-option"><input type="checkbox" value="insights"><span><strong>广告洞察</strong><small>卖点、受众、痛点和营销逻辑</small></span></label>
-                <label class="deliverable-option"><input type="checkbox" value="risk_audit"><span><strong>风险审计</strong><small>高风险声明与证据复核</small></span></label>
-                <label class="deliverable-option"><input type="checkbox" value="report"><span><strong>完整报告</strong><small>可阅读和导出的分析报告</small></span></label>
-                <label class="deliverable-option"><input type="checkbox" value="creative"><span><strong>创意方案</strong><small>Hook、脚本、分镜和 A/B 版本</small></span></label>
+                <div class="deliverable-heading"><strong>选择一种任务</strong><small>每项任务只负责一个清晰目标</small></div>
+                <label class="deliverable-option"><input type="radio" name="deliverable" value="evidence"><span><strong>证据提取</strong><small>只提取字幕、语音和 OCR</small></span></label>
+                <label class="deliverable-option"><input type="radio" name="deliverable" value="report"><span><strong>卖点分析报告</strong><small>核心卖点及必要的营销分析</small></span></label>
+                <label class="deliverable-option"><input type="radio" name="deliverable" value="risk_audit"><span><strong>风险复核</strong><small>只检查高风险和功效声明</small></span></label>
+                <label class="deliverable-option"><input type="radio" name="deliverable" value="creative"><span><strong>创意建议</strong><small>基于证据生成 Hook、脚本和分镜</small></span></label>
               </div>
             </div>
             <span class="composer-hint" id="mode-hint">普通对话</span><span id="deliverable-summary" class="deliverable-summary hidden"></span>

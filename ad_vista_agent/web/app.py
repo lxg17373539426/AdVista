@@ -224,7 +224,8 @@ class _Handler(BaseHTTPRequestHandler):
                     if parts[4] not in EXPORTS:
                         return self._error(404, "Unknown export")
                     relative, content_type = EXPORTS[parts[4]]
-                    return self._send_file(_contained(artifact_root, relative), content_type, attachment=True)
+                    export_root = run_dir if parts[4] == "evidence-json" else artifact_root
+                    return self._send_file(_contained(export_root, relative), content_type, attachment=True)
             if parts == ["app.js"] or parts == ["styles.css"]:
                 path = self.static_root / parts[0]
                 return self._send_file(path)
