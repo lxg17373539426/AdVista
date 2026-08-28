@@ -86,3 +86,8 @@ web:
   port: 8080
   max_upload_bytes: 1073741824
   analysis_workers: 1
+
+agent:
+  backend: langgraph
+  recursion_limit: 32
+  tool_choice: required

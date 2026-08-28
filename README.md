@@ -2,6 +2,8 @@
 
 AdVista Insight Agent 是一个用于广告视频理解和营销分析的多模态 Agent。它可以从本地广告视频中提取语音、画面文字和时间线证据，并生成广告洞察、风险审计、分析报告以及创意方案。
 
+Agent 控制层使用 **LangGraph ReAct**，使用 LangChain 的 Structured Tools 接入现有视频分析工具，并通过 vLLM 调用 AdInsight-RL。原有确定性的证据流水线仍作为工具执行层，确保工具依赖、证据引用和审计规则不会被模型绕过。
+
 ## 使用的模型
 
 - **AdInsight-RL**：项目的核心推理、规划、报告和创意生成模型。
@@ -82,6 +84,7 @@ http://127.0.0.1:8080
 .venv/bin/advista-agent agent /path/to/ad.mp4 \
   --goal "分析广告卖点、受众、风险并生成报告" \
   --qwen-planner \
+  --backend langgraph \
   --config configs/local.yaml
 ```
 

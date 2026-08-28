@@ -15,6 +15,8 @@ MAX_IMAGES_PER_PROMPT="${QWEN_MAX_IMAGES_PER_PROMPT:-0}"
 EXPERIMENT="${QWEN_EXPERIMENT:-default}"
 DTYPE="${QWEN_DTYPE:-bfloat16}"
 QUANTIZATION="${QWEN_QUANTIZATION:-}"
+AUTO_TOOL_CHOICE="${QWEN_ENABLE_AUTO_TOOL_CHOICE:-1}"
+TOOL_CALL_PARSER="${QWEN_TOOL_CALL_PARSER:-qwen3_xml}"
 PREFIX_FLAG="--no-enable-prefix-caching"
 EAGER_FLAG=()
 QUANTIZATION_FLAG=()
@@ -22,6 +24,10 @@ QUANTIZATION_FLAG=()
 if [[ "${QWEN_ENABLE_PREFIX_CACHING:-0}" == "1" ]]; then PREFIX_FLAG="--enable-prefix-caching"; fi
 if [[ "${QWEN_ENFORCE_EAGER:-0}" == "1" ]]; then EAGER_FLAG=(--enforce-eager); fi
 if [[ -n "$QUANTIZATION" ]]; then QUANTIZATION_FLAG=(--quantization "$QUANTIZATION"); fi
+TOOL_CHOICE_FLAG=()
+if [[ "$AUTO_TOOL_CHOICE" == "1" ]]; then
+  TOOL_CHOICE_FLAG=(--enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER")
+fi
 if [[ ! -x "$PYTHON" ]]; then printf 'vLLM Python not found: %s\n' "$PYTHON" >&2; exit 2; fi
 if [[ ! -d "$MODEL_PATH" ]]; then printf 'Model directory not found: %s\n' "$MODEL_PATH" >&2; exit 2; fi
 if [[ ! -d "$VIDEO_DIR" ]]; then printf 'Video directory not found: %s\n' "$VIDEO_DIR" >&2; exit 2; fi
@@ -55,6 +61,7 @@ CMD=(
   --enable-chunked-prefill
   --reasoning-parser qwen3
   --trust-remote-code
+  "${TOOL_CHOICE_FLAG[@]}"
   "${EAGER_FLAG[@]}"
   "${QUANTIZATION_FLAG[@]}"
 )

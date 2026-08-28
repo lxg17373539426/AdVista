@@ -307,6 +307,19 @@ def run_agent(
     execution_id: str | None = None,
     cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
+    if settings.agent.backend == "langgraph":
+        from .langgraph_backend import run_langgraph_agent
+
+        return run_langgraph_agent(
+            video_path,
+            settings,
+            request,
+            plan=plan,
+            force_tools=force_tools,
+            registry=registry,
+            execution_id=execution_id,
+            cancel_event=cancel_event,
+        )
     source = video_path.expanduser().resolve()
     if not source.is_file():
         raise FileNotFoundError(source)
@@ -355,6 +368,27 @@ def resume_agent(
 ) -> dict[str, Any]:
     store = ArtifactStore(settings.paths.output_root)
     state_dir, run_dir, state = _load(store, run_id)
+    if settings.agent.backend == "langgraph":
+        from .langgraph_backend import run_langgraph_agent
+
+        if approve:
+            if state.status != AgentRunStatus.WAITING_CONFIRMATION:
+                raise ValueError("Agent session is not waiting for confirmation")
+            state.approved_confirmations.extend(
+                item for item in state.confirmations if item not in state.approved_confirmations
+            )
+            state.confirmations.clear()
+        if state.status == AgentRunStatus.COMPLETED:
+            return state.model_dump(mode="json")
+        return run_langgraph_agent(
+            state.source_path,
+            settings,
+            state.request,
+            plan=state.plan,
+            registry=registry,
+            execution_id=state.execution_id,
+            existing_state=state,
+        )
     if approve:
         if state.status != AgentRunStatus.WAITING_CONFIRMATION:
             raise ValueError("Agent session is not waiting for confirmation")

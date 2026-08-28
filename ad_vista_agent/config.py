@@ -142,6 +142,14 @@ class WebConfig(BaseModel):
     analysis_workers: int = Field(default=1, ge=1, le=4)
 
 
+class AgentConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    backend: str = Field(default="langgraph", pattern=r"^(legacy|langgraph)$")
+    recursion_limit: int = Field(default=32, ge=4, le=100)
+    tool_choice: str = Field(default="required", pattern=r"^(auto|required)$")
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -157,6 +165,7 @@ class Settings(BaseModel):
     insight: InsightConfig
     report: ReportConfig
     web: WebConfig = WebConfig()
+    agent: AgentConfig = AgentConfig()
 
     def model_path(self, model_name: str) -> Path:
         return self.paths.model_root / model_name

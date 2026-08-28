@@ -368,10 +368,18 @@ def agent_run(
         list[str] | None,
         typer.Option("--force-tool", help="Bypass this selected tool's content cache"),
     ] = None,
+    backend: Annotated[
+        str | None,
+        typer.Option("--backend", help="Agent backend: langgraph or legacy"),
+    ] = None,
 ) -> None:
     """Run the bounded goal-driven Agent with validated tool selection."""
     try:
         settings = load_settings(config)
+        if backend is not None:
+            settings = settings.model_copy(
+                update={"agent": settings.agent.model_copy(update={"backend": backend})}
+            )
         request = AgentRequest(
             goal=goal,
             mode=mode,
