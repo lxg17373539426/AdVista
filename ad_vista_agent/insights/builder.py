@@ -21,11 +21,15 @@ from ad_vista_agent.schemas import (
 )
 from ad_vista_agent.tools import QwenInsightTool, ToolContext
 
-from .grounding import grounded_executive_summary, validate_analysis_grounding
+from .grounding import (
+    grounded_executive_summary,
+    normalize_inline_citations,
+    validate_analysis_grounding,
+)
 from .payload import build_ledger_payload
 
 
-INSIGHT_PIPELINE_VERSION = "1"
+INSIGHT_PIPELINE_VERSION = "2"
 QWEN_VERSIONS = {"vllm": "0.19.1", "torch": "2.10.0", "transformers": "5.13.0"}
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -258,7 +262,7 @@ def build_insights(
     )
     try:
         parsed = _extract_json(result.text)
-        analysis = MarketingAnalysis.model_validate(parsed)
+        analysis = normalize_inline_citations(MarketingAnalysis.model_validate(parsed))
     except Exception as exc:
         raise ValueError(f"Qwen structured output remained invalid after repair: {exc}") from exc
     validate_analysis_grounding(

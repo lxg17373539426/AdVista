@@ -229,7 +229,21 @@ class WebService:
         with self.guard:
             if job_id not in self.jobs:
                 raise KeyError(job_id)
-            return json.loads(json.dumps(self.jobs[job_id], ensure_ascii=False))
+            job = json.loads(json.dumps(self.jobs[job_id], ensure_ascii=False))
+        if job.get("status") in {"running", "cancelling"}:
+            execution_id = str(job.get("execution_id", ""))
+            session_path = self.store.execution_dir(execution_id) / "session.json"
+            if session_path.is_file():
+                session = self.store.read_json(session_path)
+                calls = session.get("tool_calls") or []
+                running = next(
+                    (call for call in reversed(calls) if call.get("status") == "running"),
+                    None,
+                )
+                completed = [call.get("tool") for call in calls if call.get("status") == "completed"]
+                job["current_tool"] = running.get("tool") if running else None
+                job["completed_tools"] = completed
+        return job
 
     def cancel_job(self, job_id: str) -> dict[str, Any]:
         with self.guard:

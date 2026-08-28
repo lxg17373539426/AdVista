@@ -12,6 +12,27 @@ SUMMARY_ORDER = (
     MarketingDimension.SELLING_POINT,
     MarketingDimension.CONVERSION_PATH,
 )
+INLINE_CITATION_PATTERN = re.compile(r"(?:speech_\d{4}|ocr_cluster_\d{4})")
+
+
+def normalize_inline_citations(analysis: MarketingAnalysis) -> MarketingAnalysis:
+    """Keep citation IDs in evidence_refs without discarding otherwise valid insights."""
+    normalized = []
+    for item in analysis.insights:
+        claim = INLINE_CITATION_PATTERN.sub("", item.claim)
+        reasoning = INLINE_CITATION_PATTERN.sub("", item.reasoning_summary)
+        for opening, closing in (("（", "）"), ("(", ")"), ("[", "]")):
+            claim = claim.replace(opening + closing, "")
+            reasoning = reasoning.replace(opening + closing, "")
+        normalized.append(
+            item.model_copy(
+                update={
+                    "claim": re.sub(r"[ \t]{2,}", " ", claim).strip(),
+                    "reasoning_summary": re.sub(r"[ \t]{2,}", " ", reasoning).strip(),
+                }
+            )
+        )
+    return analysis.model_copy(update={"insights": normalized})
 
 
 def grounded_executive_summary(analysis: MarketingAnalysis) -> str:
@@ -47,12 +68,7 @@ def validate_analysis_grounding(
             raise ValueError(
                 f"Insight {item.insight_id} cites unknown evidence: {sorted(unknown)}"
             )
-        mentioned = set(
-            re.findall(
-                r"(?:speech_\d{4}|ocr_cluster_\d{4})",
-                item.claim + " " + item.reasoning_summary,
-            )
-        )
+        mentioned = set(INLINE_CITATION_PATTERN.findall(item.claim + " " + item.reasoning_summary))
         if mentioned:
             raise ValueError(
                 f"Insight {item.insight_id} writes citation IDs outside evidence_refs: {sorted(mentioned)}"
