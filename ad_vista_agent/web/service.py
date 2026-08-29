@@ -34,7 +34,6 @@ class WebService:
         self.job_futures: dict[str, Future[None]] = {}
         self.job_cancel_events: dict[str, threading.Event] = {}
         self.locks: dict[str, threading.RLock] = {}
-        self.general_sessions: dict[str, list[dict[str, str]]] = {}
         self.guard = threading.RLock()
         self.job_root = settings.paths.output_root / "jobs"
         self.job_root.mkdir(parents=True, exist_ok=True)
@@ -89,6 +88,7 @@ class WebService:
     ) -> dict[str, Any]:
         job_id = f"job_{uuid.uuid4().hex}"
         execution_id = f"exec_{uuid.uuid4().hex}"
+        deliverables = list(dict.fromkeys(deliverables))[:1]
         job = {
             "job_id": job_id,
             "execution_id": execution_id,
@@ -128,8 +128,17 @@ class WebService:
         if not value:
             raise ValueError("消息不能为空")
         active_session = session_id or f"web_{uuid.uuid4().hex}"
-        with self.guard:
-            history = list(self.general_sessions.get(active_session, []))[-20:]
+        conversations = self._conversation_store()
+        conversations.create_session(
+            session_id=active_session,
+            run_id=f"general_{active_session}",
+            source_path=Path("."),
+            goal="普通对话",
+        )
+        history = [
+            {"role": item["role"], "content": item["content"]}
+            for item in conversations.messages(active_session, limit=20)
+        ]
         payload = {
             "model": self.settings.insight.served_model,
             "messages": [
@@ -182,13 +191,27 @@ class WebService:
             raise RuntimeError(f"对话服务错误 {exc.code}: {body[-1000:]}") from exc
         except (KeyError, TypeError, urllib.error.URLError) as exc:
             raise RuntimeError(f"对话服务不可用: {exc}") from exc
-        with self.guard:
-            self.general_sessions[active_session] = [
-                *history,
-                {"role": "user", "content": value},
-                {"role": "assistant", "content": answer},
-            ][-20:]
+        conversations.add_message(active_session, "user", value, [])
+        conversations.add_message(active_session, "assistant", answer, [])
         return {"status": "ok", "session_id": active_session, "answer": answer}
+
+    def _conversation_store(self):
+        from ad_vista_agent.agent.chat import conversation_db
+        from ad_vista_agent.memory import ConversationStore
+
+        return ConversationStore(conversation_db(self.settings))
+
+    def general_messages(self, session_id: str) -> dict[str, Any]:
+        if not session_id or any(
+            char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+            for char in session_id
+        ):
+            raise ValueError("Invalid conversation session ID")
+        conversations = self._conversation_store()
+        return {
+            "session": conversations.session(session_id),
+            "messages": conversations.messages(session_id, limit=100),
+        }
 
     def _run(
         self,

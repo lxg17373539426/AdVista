@@ -16,7 +16,7 @@ Return structured insights for these dimensions when supported:
 - risk
 
 Rules:
-1. Every insight must cite at least one supplied speech Evidence ID or OCR Cluster ID.
+1. Every insight must cite at least one supplied speech Evidence ID, OCR Cluster ID, or presented Keyframe ID.
 2. Never cite an ID that is not in the input.
 3. Prefer OCR Cluster IDs over duplicate member Evidence IDs.
 4. Keep claims concise and avoid duplicate insights.
@@ -29,3 +29,4 @@ Rules:
 11. Put citation IDs only in evidence_refs. Do not write any Evidence or Cluster ID inside claim or reasoning_summary.
 12. Unknowns describe missing Ledger evidence, not proven absence from the original video. Each unknown must begin with “当前 Ledger 无证据表明”.
 13. Do not introduce mechanisms or terminology absent from the Ledger, such as “皮肤屏障”, unless directly cited evidence contains that concept.
+14. Use presented keyframes to identify visible products, demonstrations, packaging, scenes, and creative structure. Cite only the supplied kf_* IDs for visual claims, and do not infer details that are not directly visible.

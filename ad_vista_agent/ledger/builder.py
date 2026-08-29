@@ -20,6 +20,7 @@ from ad_vista_agent.schemas import (
     EvidenceRelation,
 )
 from .rules import build_ocr_clusters, build_relations
+from ad_vista_agent.reports.evidence import build_evidence_document
 
 
 LEDGER_PIPELINE_VERSION = "1"
@@ -137,6 +138,7 @@ def build_ledger(video_path: Path, settings: Settings, *, force: bool = False) -
             ledger = EvidenceLedger.model_validate(store.read_json(ledger_path))
             _validate_source_evidence(evidence, asset=asset, run_dir=run_dir)
             _validate_ledger_outputs(ledger, evidence, clusters, relations)
+            build_evidence_document(run_dir)
             return {
                 "status": "ok",
                 "cache_hit": True,
@@ -183,6 +185,7 @@ def build_ledger(video_path: Path, settings: Settings, *, force: bool = False) -
     store.write_jsonl(clusters_path, clusters)
     store.write_jsonl(relations_path, relations)
     store.write_json(ledger_path, ledger)
+    build_evidence_document(run_dir)
     collapsed_count = sum(max(0, len(item.member_evidence_ids) - 1) for item in clusters)
     total_seconds = time.perf_counter() - total_started
     metrics = {

@@ -11,7 +11,9 @@ from ad_vista_agent.schemas import (
     EpistemicStatus,
     Evidence,
     EvidenceCluster,
+    EvidenceModality,
     GroundedMarketingInsight,
+    Keyframe,
     InsightAudit,
     InsightAuditStatus,
     MarketingAnalysis,
@@ -61,12 +63,27 @@ def expand_reference(
     *,
     evidence_by_id: dict[str, Evidence],
     clusters_by_id: dict[str, EvidenceCluster],
+    keyframes_by_id: dict[str, Keyframe],
 ) -> ReportEvidence:
     if reference_id in evidence_by_id:
         return _report_evidence_from_source(reference_id, evidence_by_id[reference_id], 1)
     cluster = clusters_by_id.get(reference_id)
     if cluster is None:
-        raise KeyError(reference_id)
+        keyframe = keyframes_by_id.get(reference_id)
+        if keyframe is None:
+            raise KeyError(reference_id)
+        return ReportEvidence(
+            reference_id=reference_id,
+            source_evidence_id=reference_id,
+            modality=EvidenceModality.FRAME,
+            content=f"关键画面 {keyframe.shot_id}",
+            start_ms=keyframe.timestamp_ms,
+            end_ms=keyframe.timestamp_ms,
+            confidence=None,
+            epistemic_status=EpistemicStatus.OBSERVED,
+            artifact_path=str(keyframe.artifact_path),
+            artifact_hash=keyframe.artifact_sha256,
+        )
     representative = evidence_by_id.get(cluster.representative_evidence_id)
     if representative is None:
         raise ValueError(
@@ -186,11 +203,13 @@ def audit_analysis(
     *,
     evidence: list[Evidence],
     clusters: list[EvidenceCluster],
+    keyframes: list[Keyframe],
     duration_ms: int,
     run_dir: Path,
 ) -> CriticAudit:
     evidence_by_id = {item.evidence_id: item for item in evidence}
     clusters_by_id = {item.cluster_id: item for item in clusters}
+    keyframes_by_id = {item.keyframe_id: item for item in keyframes}
     insight_audits: list[InsightAudit] = []
     global_findings: list[AuditFinding] = []
 
@@ -204,6 +223,7 @@ def audit_analysis(
                         reference,
                         evidence_by_id=evidence_by_id,
                         clusters_by_id=clusters_by_id,
+                        keyframes_by_id=keyframes_by_id,
                     )
                 )
             except (KeyError, ValueError) as exc:

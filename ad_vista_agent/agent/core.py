@@ -131,6 +131,7 @@ def _make_state(
 
 def _deliver(state: AgentSessionState) -> None:
     observations = state.observations
+    requested = set(state.plan.deliverables)
     report = next((item for item in reversed(observations) if "html" in item), None)
     insights = next(
         (
@@ -140,12 +141,17 @@ def _deliver(state: AgentSessionState) -> None:
         ),
         None,
     )
-    if report:
+    if report and "report" in requested:
         state.deliverables["report"] = report
-    if insights:
+    if report and "risk_audit" in requested:
+        state.deliverables["risk_audit"] = report
+    if insights and "insights" in requested:
         state.deliverables["insights"] = insights
+    evidence = next((item for item in reversed(observations) if "evidence_count" in item), None)
+    if evidence and "evidence" in requested:
+        state.deliverables["evidence"] = evidence
     creative = next((item for item in reversed(observations) if "package" in item), None)
-    if creative:
+    if creative and "creative" in requested:
         state.deliverables["creative"] = creative
 
 

@@ -16,6 +16,7 @@ from ad_vista_agent.schemas import (
     CriticAudit,
     Evidence,
     EvidenceCluster,
+    Keyframe,
     MarketingAnalysis,
     AdAsset,
 )
@@ -24,7 +25,7 @@ from .critic import audit_analysis
 from .render import render_html_report, render_markdown_report
 
 
-REPORT_PIPELINE_VERSION = "4"
+REPORT_PIPELINE_VERSION = "5"
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
@@ -87,8 +88,9 @@ def build_report(
     evidence_path = run_dir / "ledger" / "evidence.jsonl"
     clusters_path = run_dir / "ledger" / "clusters.jsonl"
     ledger_path = run_dir / "ledger" / "ledger.json"
+    keyframes_path = run_dir / "timeline" / "keyframes.jsonl"
     asset_path = run_dir / "asset.json"
-    required = [analysis_path, evidence_path, clusters_path, ledger_path, asset_path]
+    required = [analysis_path, evidence_path, clusters_path, ledger_path, keyframes_path, asset_path]
     missing = [path for path in required if not path.is_file()]
     if missing:
         names = ", ".join(str(path) for path in missing)
@@ -101,6 +103,11 @@ def build_report(
     html_path = report_dir / "report.html"
     metrics_path = output_root / "stage_7_metrics.json"
     manifest_path = output_root / "manifest.json"
+    analysis = MarketingAnalysis.model_validate(store.read_json(analysis_path))
+    if not analysis.insights:
+        raise ValueError(
+            "当前视频没有形成可验证的广告卖点，无法生成报告。请先检查语音、OCR 和关键帧证据。"
+        )
     cache_payload = _cache_payload(settings, required, request)
     cache_key = stage_cache_key(cache_payload)
 
@@ -122,7 +129,6 @@ def build_report(
                 "cache_key": cache_key,
             }
 
-    analysis = MarketingAnalysis.model_validate(store.read_json(analysis_path))
     asset = AdAsset.model_validate(store.read_json(asset_path))
     display_name_path = video_path.with_suffix(video_path.suffix + ".name")
     if display_name_path.is_file():
@@ -133,12 +139,14 @@ def build_report(
         source_name = Path(asset.filename).stem
     evidence = _load_jsonl(evidence_path, Evidence, "ledger evidence")
     clusters = _load_jsonl(clusters_path, EvidenceCluster, "ledger cluster")
+    keyframes = _load_jsonl(keyframes_path, Keyframe, "timeline keyframe")
     ledger = store.read_json(ledger_path)
     duration_ms = int(ledger["duration_ms"])
     audit = audit_analysis(
         analysis,
         evidence=evidence,
         clusters=clusters,
+        keyframes=keyframes,
         duration_ms=duration_ms,
         run_dir=run_dir,
     )

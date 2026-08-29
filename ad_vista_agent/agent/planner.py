@@ -100,7 +100,7 @@ def compile_decision(decision: PlannerDecision, request: AgentRequest) -> Analys
         deliverables = list(request.deliverables)
         selected = set()
     else:
-        deliverables = list(decision.deliverables)
+        deliverables = list(decision.deliverables)[:1]
     return _build_plan(
         request,
         deliverables,
@@ -111,7 +111,7 @@ def compile_decision(decision: PlannerDecision, request: AgentRequest) -> Analys
 
 def rule_plan(request: AgentRequest) -> AnalysisPlan:
     goal = request.goal.casefold()
-    requested = [item for item in request.deliverables if item in ALLOWED_DELIVERABLES]
+    requested = [item for item in request.deliverables if item in ALLOWED_DELIVERABLES][:1]
     if requested:
         deliverables = requested
     elif any(term in goal for term in ("证据", "字幕", "语音", "ocr", "asr", "evidence")) and not any(
@@ -125,7 +125,7 @@ def rule_plan(request: AgentRequest) -> AnalysisPlan:
     elif any(term in goal for term in ("hook", "脚本", "分镜", "创作", "a/b", "ab", "广告文案")):
         deliverables = ["creative"]
     else:
-        deliverables = ["risk_audit", "report"]
+        deliverables = ["report"]
     return _build_plan(request, deliverables)
 
 

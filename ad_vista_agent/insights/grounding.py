@@ -12,7 +12,7 @@ SUMMARY_ORDER = (
     MarketingDimension.SELLING_POINT,
     MarketingDimension.CONVERSION_PATH,
 )
-INLINE_CITATION_PATTERN = re.compile(r"(?:speech_\d{4}|ocr_cluster_\d{4})")
+INLINE_CITATION_PATTERN = re.compile(r"(?:speech_\d{4}|ocr_cluster_\d{4}|kf_[0-9a-z_]+)")
 
 
 def normalize_inline_citations(analysis: MarketingAnalysis) -> MarketingAnalysis:

@@ -17,11 +17,16 @@ from .service import WebService
 
 
 EXPORTS = {
+    "evidence-html": ("ledger/evidence.html", "text/html; charset=utf-8"),
+    "evidence-markdown": ("ledger/evidence.md", "text/markdown; charset=utf-8"),
+    "evidence-json": ("ledger/evidence.jsonl", "application/json"),
     "report-html": ("report/report.html", "text/html; charset=utf-8"),
     "report-markdown": ("report/report.md", "text/markdown; charset=utf-8"),
     "analysis-json": ("insights/analysis.json", "application/json"),
     "audit-json": ("critic/audit.json", "application/json"),
     "creative-json": ("creative/package.json", "application/json"),
+    "marketing-html": ("marketing/marketing.html", "text/html; charset=utf-8"),
+    "marketing-markdown": ("marketing/marketing.md", "text/markdown; charset=utf-8"),
 }
 
 
@@ -184,6 +189,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "evidence_refs": result.get("evidence_refs", []),
                 "session_id": result.get("session_id"),
                 "report_url": result.get("report_url"),
+                "report_label": result.get("report_label"),
             }
         )
 
@@ -196,6 +202,9 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send_json({"status": "ok", "service": "advista-agent-web"})
             if parts == ["api", "runs"]:
                 return self._send_json({"runs": self.service.runs()})
+            if parts == ["api", "chat", "messages"]:
+                session_id = query.get("session_id", [""])[0]
+                return self._send_json(self.service.general_messages(session_id))
             if parts[0:2] == ["api", "jobs"] and len(parts) == 3:
                 return self._send_json(self.service.job(parts[2]))
             if len(parts) >= 3 and parts[0:2] == ["api", "runs"]:
@@ -223,8 +232,10 @@ class _Handler(BaseHTTPRequestHandler):
                 if parts[3] == "exports" and len(parts) == 5:
                     if parts[4] not in EXPORTS:
                         return self._error(404, "Unknown export")
+                    if parts[4] in {"report-html", "report-markdown", "audit-json"} and not self.service.has_reportable_insights(run_id):
+                        return self._error(409, "当前视频没有可验证洞察，无法下载空报告")
                     relative, content_type = EXPORTS[parts[4]]
-                    export_root = run_dir if parts[4] == "evidence-json" else artifact_root
+                    export_root = run_dir if parts[4].startswith("evidence-") else artifact_root
                     return self._send_file(_contained(export_root, relative), content_type, attachment=True)
             if parts == ["app.js"] or parts == ["styles.css"]:
                 path = self.static_root / parts[0]
@@ -333,6 +344,7 @@ class _Handler(BaseHTTPRequestHandler):
                         "session_id": result.get("session_id"),
                         "evidence_refs": result.get("evidence_refs", []),
                         "report_url": result.get("report_url"),
+                        "report_label": result.get("report_label"),
                         "message": {
                             "message_id": result.get("assistant_message_id"),
                             "version_id": result.get("version_id"),

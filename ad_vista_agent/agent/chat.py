@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import html
 import json
 import mimetypes
 import re
@@ -14,6 +15,7 @@ from pydantic import BaseModel
 from ad_vista_agent.config import Settings
 from ad_vista_agent.creative.builder import build_creative
 from ad_vista_agent.reports.builder import build_report
+from ad_vista_agent.reports.evidence import build_evidence_document
 from ad_vista_agent.memory import ConversationStore
 from ad_vista_agent.runtime import ArtifactStore
 from ad_vista_agent.schemas import (
@@ -234,6 +236,13 @@ def validate_conversation_answer(answer: ConversationAnswer, allowed_refs: set[s
 
 
 def normalize_conversation_answer(answer: ConversationAnswer) -> ConversationAnswer:
+    references = []
+    for reference in answer.evidence_refs:
+        value = reference.strip()
+        if value and value not in references:
+            references.append(value)
+    if references != answer.evidence_refs:
+        answer = answer.model_copy(update={"evidence_refs": references})
     if answer.epistemic_status == "unknown" and answer.evidence_refs:
         answer = answer.model_copy(update={"evidence_refs": []})
     if answer.epistemic_status in {"grounded", "visual"} and not answer.evidence_refs:
@@ -280,7 +289,8 @@ def _needs_visual_context(question: str) -> bool:
         term in value
         for term in (
             "颜色", "什么色", "外观", "长什么样", "款式", "形状", "画面", "镜头",
-            "包装", "logo", "标志", "人物", "穿着", "鞋", "衣服", "材质", "质地",
+            "包装", "logo", "标志", "人物", "模特", "男", "女", "男性", "女性", "性别",
+            "穿着", "鞋", "衣服", "材质", "质地",
             "整个视频", "完整视频", "逐镜头", "发生了什么", "过程", "动作", "变化", "开头", "结尾",
             "color", "look", "visual", "material", "scene", "video",
         )
@@ -292,9 +302,25 @@ def _is_creative_request(question: str) -> bool:
     return any(term in value for term in ("脚本", "分镜", "hook", "钩子", "a/b", "ab 版本", "广告文案"))
 
 
+def _is_marketing_request(question: str) -> bool:
+    value = question.casefold()
+    return any(
+        term in value
+        for term in (
+            "营销方案", "营销报告", "营销计划", "推广方案", "销售方案",
+            "营销策略", "marketing plan", "marketing strategy",
+        )
+    )
+
+
 def _is_report_request(question: str) -> bool:
     value = question.casefold()
     return any(term in value for term in ("html", "htlm", "markdown", "报告", "导出分析", "生成分析"))
+
+
+def _is_evidence_request(question: str) -> bool:
+    value = question.casefold()
+    return any(term in value for term in ("证据提取", "证据文档", "证据报告", "evidence"))
 
 
 def _workspace_answer(
@@ -341,6 +367,48 @@ def _workspace_answer(
         answer="\n".join(lines),
         epistemic_status="conversational",
     ), has_html
+
+
+def _seed_conversation(
+    conversations: ConversationStore,
+    state: AgentSessionState,
+) -> list[dict[str, Any]]:
+    history = conversations.messages(state.session_id)
+    if history:
+        return history
+    conversations.add_message(state.session_id, "user", state.request.goal, [])
+    generated = {
+        "evidence": "证据提取",
+        "insights": "卖点分析",
+        "risk_audit": "风险复核",
+        "report": "卖点分析报告",
+        "creative": "创意建议",
+    }
+    labels = [generated[item] for item in state.deliverables if item in generated]
+    summary = "、".join(labels) if labels else "视频分析"
+    conversations.add_message(
+        state.session_id,
+        "assistant",
+        f"{summary}已完成。你可以继续询问当前视频，或让我根据分析结果制定营销方案。",
+        [],
+    )
+    return conversations.messages(state.session_id)
+
+
+def _write_marketing_report(artifact_root: Path, answer: str) -> None:
+    output_dir = artifact_root / "marketing"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "marketing.md").write_text(answer + "\n", encoding="utf-8")
+    document = (
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>营销方案</title><style>body{max-width:900px;margin:48px auto;padding:0 24px;"
+        "font:16px/1.75 system-ui,sans-serif;color:#20201e;background:#f7f7f5}"
+        "article{white-space:pre-wrap;background:#fff;padding:36px;border:1px solid #ddd;"
+        "border-radius:14px}h1{font-size:28px}</style></head><body><h1>营销方案</h1><article>"
+        f"{html.escape(answer)}</article></body></html>"
+    )
+    (output_dir / "marketing.html").write_text(document, encoding="utf-8")
 
 
 def _strip_evidence_ids(value: str) -> str:
@@ -512,6 +580,7 @@ def _qwen_answer(
     run_dir: Path | None = None,
     include_images: bool = False,
     image_frames: list[dict[str, Any]] | None = None,
+    intent: str = "answer",
     on_delta: Callable[[str], None] | None = None,
 ) -> ConversationAnswer:
     prompt = (
@@ -528,6 +597,16 @@ def _qwen_answer(
         "不得把广告声明写成独立验证的客观事实，不得编造价格、成分、受众属性或视频内容。"
         "不要在 answer 正文中输出 speech_*、ocr_cluster_*、kf_* 等内部证据 ID，只放在 evidence_refs 字段。"
     )
+    if intent == "marketing":
+        prompt += (
+            "用户正在请求营销方案或营销报告，不要把它当作单一事实问答。"
+            "请综合 Evidence Ledger、已验证洞察、关键帧和会话历史，直接输出可执行的中文营销方案，"
+            "至少包含产品定位、目标人群、核心卖点、传播策略、内容方向、渠道与转化建议。"
+            "可以基于多条证据进行合理营销推演，但广告未明确支持的内容必须标注为建议或假设，"
+            "不要因为部分策略需要进一步验证就把整份方案判定为 unknown。"
+            "营销建议本身不是对视频事实的断言，因此可在产品事实有证据支撑时使用 grounded，"
+            "并在 evidence_refs 中引用支撑产品定位和卖点的相关 ID。"
+        )
     messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
     for item in history[-12:]:
         messages.append({"role": item["role"], "content": item["content"]})
@@ -613,7 +692,7 @@ def ask_agent(
         source_path=state.source_path,
         goal=state.request.goal,
     )
-    history = conversations.messages(state.session_id)
+    history = _seed_conversation(conversations, state)
     report_url: str | None = None
     state_status = getattr(state, "status", "completed")
     status_value = str(getattr(state_status, "value", state_status))
@@ -627,6 +706,41 @@ def ask_agent(
         answer, has_html_report = workspace
         if has_html_report:
             report_url = f"/api/runs/{run_id}/exports/report-html"
+    elif _is_evidence_request(value):
+        result = build_evidence_document(run_dir)
+        report_url = f"/api/runs/{run_id}/exports/evidence-html"
+        answer = ConversationAnswer(
+            answer=f"证据提取文档已生成：{result['evidence_count']} 条原始证据。点击下方按钮查看 HTML 文档。",
+            epistemic_status="conversational",
+        )
+    elif _is_marketing_request(value):
+        image_frames = _relevant_keyframes(
+            value, context, settings.insight.max_images_per_prompt
+        )
+        raw_answer = _qwen_answer(
+            value,
+            context,
+            history,
+            settings,
+            run_dir=run_dir,
+            include_images=True,
+            image_frames=image_frames,
+            intent="marketing",
+        )
+        answer = normalize_conversation_answer(raw_answer)
+        keyframe_refs = _presented_keyframe_refs(
+            run_dir, context, image_frames, settings.insight.max_images_per_prompt
+        )
+        observed_keyframe_refs = {
+            str(item.get("keyframe_id"))
+            for item in context.get("visual_observations", [])
+            if isinstance(item, dict) and str(item.get("keyframe_id", "")).startswith("kf_")
+        }
+        allowed_refs = {
+            ref for ref in allowed_refs if not ref.startswith("kf_")
+        } | observed_keyframe_refs | keyframe_refs
+        _write_marketing_report(artifact_root, answer.answer)
+        report_url = f"/api/runs/{run_id}/exports/marketing-html"
     elif _is_report_request(value):
         result = build_report(
             state.source_path,
@@ -713,6 +827,7 @@ def ask_agent(
         **answer.model_dump(mode="json"),
         "citations": citations,
         "report_url": report_url,
+        "report_label": "查看营销方案" if report_url and "marketing-html" in report_url else None,
     }
 
 
@@ -726,6 +841,7 @@ def show_conversation(run_id: str, settings: Settings) -> dict[str, Any]:
         goal=state.request.goal,
     )
     session = conversations.session(state.session_id)
+    _seed_conversation(conversations, state)
     messages = conversations.messages(state.session_id, limit=100)
     for message in messages:
         references = [str(item) for item in message.get("citations", [])]
