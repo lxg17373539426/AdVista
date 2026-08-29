@@ -117,7 +117,9 @@ class InsightConfig(BaseModel):
     runtime: str = Field(default="openai", pattern=r"^(openai|subprocess)$")
     endpoint: str = "http://127.0.0.1:8000/v1"
     served_model: str = "AdInsight-RL"
-    max_model_len: int = Field(default=8192, ge=1024)
+    max_model_len: int = Field(default=262144, ge=1024)
+    max_images_per_prompt: int = Field(default=8, ge=1, le=64)
+    visual_batch_overlap: int = Field(default=1, ge=0, le=8)
     max_tokens: int = Field(default=4096, ge=256)
     gpu_memory_utilization: float = Field(default=0.8, gt=0, le=1)
     temperature: float = Field(default=0.0, ge=0, le=2)

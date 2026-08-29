@@ -69,7 +69,9 @@ insight:
   runtime: openai
   endpoint: http://127.0.0.1:8000/v1
   served_model: AdInsight-RL
-  max_model_len: 8192
+  max_model_len: 262144
+  max_images_per_prompt: 8
+  visual_batch_overlap: 1
   max_tokens: 4096
   gpu_memory_utilization: 0.8
   temperature: 0.0

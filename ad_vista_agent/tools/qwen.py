@@ -12,6 +12,22 @@ from typing import Any
 from .base import Tool, ToolContext
 
 
+MAX_IMAGES_PER_PROMPT = 8
+
+
+def _image_count(messages: list[dict[str, Any]]) -> int:
+    count = 0
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        count += sum(
+            isinstance(item, dict) and item.get("type") == "image_url"
+            for item in content
+        )
+    return count
+
+
 @dataclass(frozen=True)
 class QwenInsightResult:
     text: str
@@ -35,6 +51,7 @@ class QwenInsightTool(Tool):
         runtime: str = "subprocess",
         endpoint: str = "http://127.0.0.1:8000/v1",
         served_model: str = "AdInsight-RL",
+        max_images_per_prompt: int = MAX_IMAGES_PER_PROMPT,
     ) -> None:
         self.python_executable = python_executable.expanduser().absolute()
         self.timeout_seconds = timeout_seconds
@@ -42,8 +59,15 @@ class QwenInsightTool(Tool):
         self.runtime = runtime
         self.endpoint = endpoint.rstrip("/")
         self.served_model = served_model
+        self.max_images_per_prompt = max_images_per_prompt
 
     def run(self, context: ToolContext, arguments: dict[str, Any]) -> QwenInsightResult:
+        messages = list(arguments.get("messages") or [])
+        image_count = _image_count(messages)
+        if image_count > self.max_images_per_prompt:
+            raise ValueError(
+                f"AdVista 单次分析最多支持 {self.max_images_per_prompt} 张关键帧，当前为 {image_count} 张"
+            )
         if self.runtime == "openai":
             return self._run_openai(arguments)
         if self.runtime != "subprocess":
@@ -51,6 +75,7 @@ class QwenInsightTool(Tool):
         return self._run_subprocess(context, arguments)
 
     def _run_openai(self, arguments: dict[str, Any]) -> QwenInsightResult:
+        messages = list(arguments["messages"])
         sampling = {
             "temperature": float(arguments["temperature"]),
             "max_tokens": int(arguments["max_tokens"]),
@@ -75,9 +100,9 @@ class QwenInsightTool(Tool):
                     value = json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")
-                raise RuntimeError(f"Qwen service HTTP {exc.code}: {body[-4000:]}") from exc
+                raise RuntimeError(f"AdVista 分析服务 HTTP {exc.code}: {body[-4000:]}") from exc
             except (urllib.error.URLError, TimeoutError) as exc:
-                raise RuntimeError(f"Qwen service request failed: {exc}") from exc
+                raise RuntimeError(f"AdVista 分析服务请求失败: {exc}") from exc
             try:
                 text = str(value["choices"][0]["message"]["content"])
                 raw_usage = value.get("usage") or {}
@@ -87,9 +112,9 @@ class QwenInsightTool(Tool):
                 }
                 return text, usage
             except (KeyError, TypeError, ValueError) as exc:
-                raise RuntimeError("Qwen service returned an invalid response") from exc
+                raise RuntimeError("AdVista 分析服务返回了无效响应") from exc
 
-        text, usage = request(list(arguments["messages"]))
+        text, usage = request(messages)
         attempts = [text]
         try:
             json.loads(text)

@@ -155,6 +155,7 @@ def build_creative(
         runtime=settings.insight.runtime,
         endpoint=settings.insight.endpoint,
         served_model=settings.insight.served_model,
+        max_images_per_prompt=settings.insight.max_images_per_prompt,
     )
     inference = tool.run(
         ToolContext(run_id=run_id, run_dir=run_dir),

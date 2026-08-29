@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import time
 from pathlib import Path
 from typing import Any, TypeVar
@@ -17,6 +19,7 @@ from ad_vista_agent.schemas import (
     EvidenceCluster,
     EvidenceLedger,
     EvidenceRelation,
+    Keyframe,
     MarketingAnalysis,
 )
 from ad_vista_agent.tools import QwenInsightTool, ToolContext
@@ -29,9 +32,21 @@ from .grounding import (
 from .payload import build_ledger_payload
 
 
-INSIGHT_PIPELINE_VERSION = "2"
+INSIGHT_PIPELINE_VERSION = "5"
 QWEN_VERSIONS = {"vllm": "0.19.1", "torch": "2.10.0", "transformers": "5.13.0"}
 ModelT = TypeVar("ModelT", bound=BaseModel)
+
+
+class FrameObservation(BaseModel):
+    keyframe_id: str
+    description: str
+    visible_text: str = ""
+    product_or_subject: str = ""
+    action_or_change: str = ""
+
+
+class FrameObservationBatch(BaseModel):
+    observations: list[FrameObservation]
 
 
 def _load_jsonl(path: Path, model: type[ModelT], label: str) -> list[ModelT]:
@@ -97,6 +112,106 @@ def _extract_json(text: str) -> dict[str, Any]:
     return result
 
 
+def _visual_content(run_dir: Path, keyframes: list[Keyframe]) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = []
+    for item in keyframes:
+        path = (run_dir / item.artifact_path).resolve()
+        if not path.is_file() or not path.is_relative_to(run_dir.resolve()):
+            continue
+        mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        content.extend(
+            [
+                {
+                    "type": "text",
+                    "text": f"关键帧 {item.keyframe_id}，时间 {item.timestamp_ms}ms：",
+                },
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}},
+            ]
+        )
+    return content
+
+
+def _visual_prompt() -> str:
+    return (
+        "你是广告视频视觉证据提取器。只描述关键帧中直接可见的内容，不做营销推断。"
+        "逐帧返回结构化观察：画面描述、可读文字、产品或主体、动作或相对前后变化。"
+        "每个 keyframe_id 必须原样保留；看不清的字段填写空字符串。"
+        "所有描述使用中文，不要编造品牌、材质、功效或人物属性。"
+    )
+
+
+def _visual_observations(
+    run_dir: Path,
+    keyframes: list[Keyframe],
+    settings: Settings,
+    tool: QwenInsightTool,
+    run_id: str,
+) -> tuple[list[FrameObservation], list[str], int, int]:
+    observations_by_id: dict[str, FrameObservation] = {}
+    attempts: list[str] = []
+    prompt_tokens = 0
+    completion_tokens = 0
+    batch_size = settings.insight.max_images_per_prompt
+    overlap = min(settings.insight.visual_batch_overlap, batch_size - 1)
+    for start in _visual_batch_starts(len(keyframes), batch_size, overlap):
+        batch = keyframes[start : start + batch_size]
+        messages = [
+            {"role": "system", "content": _visual_prompt()},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "请分析以下关键帧，不要遗漏任何一帧。",
+                    },
+                    *_visual_content(run_dir, batch),
+                ],
+            },
+        ]
+        result = tool.run(
+            ToolContext(run_id=run_id, run_dir=run_dir),
+            {
+                "model_path": str(settings.model_path(settings.insight.model)),
+                "gpu_memory_utilization": settings.insight.gpu_memory_utilization,
+                "max_model_len": settings.insight.max_model_len,
+                "max_tokens": 900,
+                "temperature": 0.0,
+                "messages": messages,
+                "output_schema": FrameObservationBatch.model_json_schema(),
+            },
+        )
+        attempts.extend(result.attempts)
+        prompt_tokens += result.prompt_tokens
+        completion_tokens += result.completion_tokens
+        parsed = FrameObservationBatch.model_validate(_extract_json(result.text))
+        expected = {item.keyframe_id for item in batch}
+        for item in parsed.observations:
+            if item.keyframe_id in expected:
+                observations_by_id[item.keyframe_id] = item
+    observations = [
+        observations_by_id[item.keyframe_id]
+        for item in keyframes
+        if item.keyframe_id in observations_by_id
+    ]
+    return observations, attempts, prompt_tokens, completion_tokens
+
+
+def _visual_batch_starts(keyframe_count: int, batch_size: int, overlap: int) -> list[int]:
+    if keyframe_count <= 0:
+        return []
+    effective_overlap = min(overlap, batch_size - 1)
+    step = batch_size - effective_overlap
+    starts = [0]
+    while starts[-1] + batch_size < keyframe_count:
+        starts.append(starts[-1] + step)
+    return starts
+
+
+def _visual_batch_count(keyframe_count: int, batch_size: int, overlap: int) -> int:
+    return len(_visual_batch_starts(keyframe_count, batch_size, overlap))
+
+
 def _cache_payload(
     settings: Settings,
     *,
@@ -117,6 +232,8 @@ def _cache_payload(
             "max_model_len": settings.insight.max_model_len,
             "max_tokens": settings.insight.max_tokens,
             "temperature": settings.insight.temperature,
+            "max_images_per_prompt": settings.insight.max_images_per_prompt,
+            "visual_batch_overlap": settings.insight.visual_batch_overlap,
             "max_insights_per_dimension": max_insights_per_dimension,
         },
         "task": request.model_dump(mode="json") if request is not None else None,
@@ -146,7 +263,8 @@ def build_insights(
     clusters_path = ledger_dir / "clusters.jsonl"
     relations_path = ledger_dir / "relations.jsonl"
     ledger_path = ledger_dir / "ledger.json"
-    required = [evidence_path, clusters_path, relations_path, ledger_path]
+    keyframes_path = run_dir / "timeline" / "keyframes.jsonl"
+    required = [evidence_path, clusters_path, relations_path, ledger_path, keyframes_path]
     missing = [path for path in required if not path.is_file()]
     if missing:
         names = ", ".join(str(path.relative_to(run_dir)) for path in missing)
@@ -156,6 +274,7 @@ def build_insights(
     output_root = artifact_root or run_dir
     output_dir = output_root / "insights"
     raw_path = output_dir / "raw_response.json"
+    visual_observations_path = output_dir / "visual_observations.json"
     analysis_path = output_dir / "analysis.json"
     metrics_path = output_root / "stage_6_metrics.json"
     manifest_path = output_root / "manifest.json"
@@ -174,12 +293,13 @@ def build_insights(
     evidence = _load_jsonl(evidence_path, Evidence, "ledger evidence")
     clusters = _load_jsonl(clusters_path, EvidenceCluster, "ledger cluster")
     relations = _load_jsonl(relations_path, EvidenceRelation, "ledger relation")
+    keyframes = _load_jsonl(keyframes_path, Keyframe, "timeline keyframe")
     ledger = EvidenceLedger.model_validate(store.read_json(ledger_path))
     allowed_refs = {
         item.evidence_id for item in evidence if item.modality.value == "speech"
-    } | {item.cluster_id for item in clusters}
+    } | {item.cluster_id for item in clusters} | {item.keyframe_id for item in keyframes}
 
-    if not force and analysis_path.is_file() and metrics_path.is_file():
+    if not force and analysis_path.is_file() and metrics_path.is_file() and visual_observations_path.is_file():
         metrics = store.read_json(metrics_path)
         if metrics.get("cache_key") == cache_key:
             analysis = MarketingAnalysis.model_validate(store.read_json(analysis_path))
@@ -212,19 +332,6 @@ def build_insights(
         if request is not None
         else {"goal": "通用广告分析", "mode": "quick", "deliverables": ["insights"]}
     )
-    messages = [
-        {"role": "system", "content": prompt},
-        {
-            "role": "user",
-            "content": "请围绕 TASK 的用户目标，基于 EVIDENCE_LEDGER 输出结构化广告洞察。"
-            "目标只决定分析重点，不能降低证据标准。\n"
-            + json.dumps(
-                {"task": task_payload, "evidence_ledger": ledger_payload},
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
-        },
-    ]
     tool = QwenInsightTool(
         settings.insight.python_executable,
         settings.insight.timeout_seconds,
@@ -232,7 +339,33 @@ def build_insights(
         runtime=settings.insight.runtime,
         endpoint=settings.insight.endpoint,
         served_model=settings.insight.served_model,
+        max_images_per_prompt=settings.insight.max_images_per_prompt,
     )
+    visual_observations, visual_attempts, visual_prompt_tokens, visual_completion_tokens = _visual_observations(
+        run_dir, keyframes, settings, tool, run_id
+    )
+    store.write_json(
+        visual_observations_path,
+        {"observations": [item.model_dump(mode="json") for item in visual_observations]},
+    )
+    messages = [
+        {"role": "system", "content": prompt},
+        {
+            "role": "user",
+            "content": "请围绕 TASK 的用户目标，综合完整视频的视觉观察与 EVIDENCE_LEDGER 输出结构化广告洞察。"
+            "目标只决定分析重点，不能降低证据标准。\n"
+            + json.dumps(
+                {
+                    "task": task_payload,
+                    "evidence_ledger": ledger_payload,
+                    "visual_observations": [item.model_dump(mode="json") for item in visual_observations],
+                    "allowed_keyframe_ids": [item.keyframe_id for item in keyframes],
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        },
+    ]
     analysis_path.unlink(missing_ok=True)
     metrics_path.unlink(missing_ok=True)
     inference_started = time.perf_counter()
@@ -254,9 +387,9 @@ def build_insights(
     store.write_json(
         raw_path,
         {
-            "attempts": result.attempts,
-            "attempt_count": result.attempt_count,
-            "selected_attempt": result.attempt_count - 1,
+            "attempts": visual_attempts + result.attempts,
+            "attempt_count": len(visual_attempts) + result.attempt_count,
+            "selected_attempt": len(visual_attempts) + result.attempt_count - 1,
             "versions": result.versions,
         },
     )
@@ -282,15 +415,22 @@ def build_insights(
         "cache_key": cache_key,
         "cache_payload": cache_payload,
         "cache_hit": False,
-        "prompt_tokens": result.prompt_tokens,
-        "completion_tokens": result.completion_tokens,
-        "attempt_count": result.attempt_count,
+        "prompt_tokens": visual_prompt_tokens + result.prompt_tokens,
+        "completion_tokens": visual_completion_tokens + result.completion_tokens,
+        "attempt_count": len(visual_attempts) + result.attempt_count,
         "insight_count": len(analysis.insights),
         "dimension_counts": {
             dimension: sum(item.dimension.value == dimension for item in analysis.insights)
             for dimension in sorted({item.dimension.value for item in analysis.insights})
         },
         "unknown_count": len(analysis.unknowns),
+        "visual_keyframe_count": len(keyframes),
+        "visual_observation_count": len(visual_observations),
+        "visual_batch_count": _visual_batch_count(
+            len(keyframes),
+            settings.insight.max_images_per_prompt,
+            settings.insight.visual_batch_overlap,
+        ),
         "task": task_payload,
         "effective_mode_profile": {
             "mode": task_payload.get("mode", "quick"),
@@ -315,6 +455,7 @@ def build_insights(
         "configuration": cache_payload,
         "artifacts": {
             "analysis": "insights/analysis.json",
+            "visual_observations": "insights/visual_observations.json",
             "raw_response": "insights/raw_response.json",
             "metrics": "stage_6_metrics.json",
         },
