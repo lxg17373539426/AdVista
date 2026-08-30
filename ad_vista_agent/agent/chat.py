@@ -78,7 +78,7 @@ def _context(
     missing = [path for path in (evidence_path, clusters_path) if not path.is_file()]
     if missing:
         names = ", ".join(str(path) for path in missing)
-        raise FileNotFoundError(f"Chat requires existing Ledger and insight artifacts; missing: {names}")
+        raise FileNotFoundError(f"视频证据尚未准备完成：{names}")
     evidence = _load_jsonl(evidence_path, Evidence)
     clusters = _load_jsonl(clusters_path, EvidenceCluster)
     analysis = (
@@ -298,13 +298,27 @@ def _is_marketing_request(question: str) -> bool:
         term in value
         for term in (
             "营销方案", "营销报告", "营销计划", "推广方案", "销售方案",
-            "营销策略", "marketing plan", "marketing strategy",
+            "营销策略", "卖点总结", "总结卖点", "产品卖点", "广告卖点",
+            "marketing plan", "marketing strategy",
         )
+    )
+
+
+def _is_direct_marketing_summary(question: str) -> bool:
+    value = question.casefold()
+    no_report = any(term in value for term in ("不需要报告", "不要报告", "不用报告", "无需报告"))
+    explicit_report = any(term in value for term in ("生成报告", "需要的是报告", "请提供报告", "要一份报告", "要报告", "导出报告"))
+    return (
+        any(term in value for term in ("卖点", "产品是什么", "展示的商品是什么"))
+        and any(term in value for term in ("直接", "总结", "告诉我", "是什么"))
+        and (no_report or not explicit_report)
     )
 
 
 def _is_report_request(question: str) -> bool:
     value = question.casefold()
+    if any(term in value for term in ("不需要报告", "不要报告", "不用报告", "无需报告", "直接总结")):
+        return False
     return any(term in value for term in ("html", "htlm", "markdown", "报告", "导出分析", "生成分析"))
 
 
@@ -716,7 +730,7 @@ def ask_agent(
             answer=f"证据提取文档已生成：{result['evidence_count']} 条原始证据。点击下方按钮查看 HTML 文档。",
             epistemic_status="conversational",
         )
-    elif _is_marketing_request(value):
+    elif _is_direct_marketing_summary(value) or _is_marketing_request(value):
         image_frames = _relevant_keyframes(
             value, context, settings.insight.max_images_per_prompt
         )

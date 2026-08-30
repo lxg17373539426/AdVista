@@ -246,7 +246,7 @@ class _Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError) as exc:
             self._error(400, str(exc))
         except Exception as exc:
-            self._error(500, str(exc)[-1000:])
+            self._error(500, "服务暂时无法完成请求，请稍后重试。")
 
     def _artifact_json(self, run_dir: Path, relative: str) -> None:
         path = _contained(run_dir, relative)
@@ -304,7 +304,7 @@ class _Handler(BaseHTTPRequestHandler):
                         {
                             "type": "error",
                             "code": "chat_failed",
-                            "message": str(exc)[-1000:],
+                            "message": "视频问答暂时无法完成，请稍后重试；如果问题持续，请重新上传视频。",
                             "retryable": True,
                         }
                     )
@@ -332,7 +332,7 @@ class _Handler(BaseHTTPRequestHandler):
                         {
                             "type": "error",
                             "code": "answer_validation_failed",
-                            "message": str(exc)[-1000:],
+                            "message": "视频问答暂时无法完成，请稍后重试；如果问题持续，请重新上传视频。",
                             "retryable": True,
                         }
                     )
@@ -383,7 +383,7 @@ class _Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError) as exc:
             self._error(400, str(exc))
         except Exception as exc:
-            self._error(500, str(exc)[-1000:])
+            self._error(500, "服务暂时无法完成请求，请稍后重试。")
 
     def do_DELETE(self) -> None:
         try:
@@ -394,7 +394,7 @@ class _Handler(BaseHTTPRequestHandler):
         except KeyError:
             self._error(404, "Job not found")
         except Exception as exc:
-            self._error(500, str(exc)[-1000:])
+            self._error(500, "任务状态暂时无法读取，请稍后重试。")
 
     def _upload(self) -> None:
         content_length = int(self.headers.get("Content-Length", "0"))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import urllib.error
 import urllib.request
@@ -23,6 +24,9 @@ from ad_vista_agent.config import Settings
 from ad_vista_agent.creative.builder import build_creative
 from ad_vista_agent.runtime import ArtifactStore
 from ad_vista_agent.schemas import AgentRequest
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class WebService:
@@ -77,6 +81,15 @@ class WebService:
         with self.guard:
             self.jobs[job_id].update(changes)
             self._persist_job(self.jobs[job_id])
+
+    @staticmethod
+    def _public_error(message: str) -> str:
+        """Keep implementation paths and backend details out of the UI."""
+        if "requires completed" in message or "missing:" in message:
+            return "视频证据尚未准备完成，请重新提交视频或稍后重试。"
+        if "Qwen" in message or "Chat service" in message or "HTTP" in message:
+            return "视频问答服务暂时不可用，请稍后重试。"
+        return "视频处理失败，请稍后重试；如果问题持续，请重新上传视频。"
 
     def submit(
         self,
@@ -254,7 +267,9 @@ class WebService:
                 result=result,
             )
         except Exception as exc:
-            self._update_job(job_id, status="failed", error=str(exc)[-4000:])
+            detail = str(exc)[-4000:]
+            LOGGER.exception("Video job %s failed: %s", job_id, detail)
+            self._update_job(job_id, status="failed", error=self._public_error(detail))
 
     def job(self, job_id: str) -> dict[str, Any]:
         with self.guard:
