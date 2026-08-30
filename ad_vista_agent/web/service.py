@@ -232,6 +232,11 @@ class WebService:
             request = AgentRequest(goal=goal, deliverables=deliverables, mode=mode)
             registry = build_agent_registry(self.settings)
             plan = rule_plan(request) if deliverables else qwen_plan(request, registry, self.settings)
+            self._update_job(
+                job_id,
+                response_mode=plan.response_mode,
+                planned_deliverables=plan.deliverables,
+            )
             result = run_agent(
                 video_path,
                 self.settings,

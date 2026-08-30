@@ -38,6 +38,7 @@ class PlannerDecision(BaseModel):
     goal: str
     selected_tools: list[str] = Field(min_length=1, max_length=8)
     deliverables: list[str] = Field(min_length=1, max_length=5)
+    response_mode: str = Field(pattern=r"^(answer|artifact)$")
     requires_confirmation: list[str] = Field(default_factory=list, max_length=4)
 
 
@@ -66,6 +67,7 @@ def _build_plan(
     deliverables: list[str],
     *,
     selected_tools: set[str] | None = None,
+    response_mode: str = "artifact",
     requires_confirmation: list[str] | None = None,
 ) -> AnalysisPlan:
     normalized_deliverables = list(dict.fromkeys(deliverables))
@@ -84,6 +86,7 @@ def _build_plan(
             for index, name in enumerate(tools, 1)
         ],
         deliverables=normalized_deliverables,
+        response_mode=response_mode,
         max_tool_calls=request.max_tool_calls,
         requires_confirmation=list(requires_confirmation or []),
     )
@@ -99,12 +102,15 @@ def compile_decision(decision: PlannerDecision, request: AgentRequest) -> Analys
     if request.deliverables:
         deliverables = list(request.deliverables)
         selected = set()
+        response_mode = "artifact"
     else:
-        deliverables = list(decision.deliverables)[:1]
+        response_mode = decision.response_mode
+        deliverables = [] if response_mode == "answer" else list(decision.deliverables)[:1]
     return _build_plan(
         request,
         deliverables,
         selected_tools=selected,
+        response_mode=response_mode,
         requires_confirmation=decision.requires_confirmation,
     )
 
@@ -162,6 +168,10 @@ def validate_plan(plan: AnalysisPlan, registry: ToolRegistry, request: AgentRequ
         if "force" in step.arguments and not isinstance(step.arguments["force"], bool):
             raise ValueError(f"Tool {step.tool} force argument must be boolean")
         completed.add(step.tool)
+    if plan.response_mode == "answer" and plan.deliverables:
+        raise ValueError("Answer plan must not contain deliverables")
+    if plan.response_mode == "artifact" and not plan.deliverables:
+        raise ValueError("Artifact plan must contain at least one deliverable")
     invalid_deliverables = set(plan.deliverables).difference(ALLOWED_DELIVERABLES)
     if invalid_deliverables:
         raise ValueError(f"Unknown deliverables: {', '.join(sorted(invalid_deliverables))}")
@@ -186,6 +196,9 @@ def qwen_plan(request: AgentRequest, registry: ToolRegistry, settings: Settings)
         "selected_tools 只能使用工具列表中的名称，并且只能选择目标所需的最终能力；本地编译器会补齐依赖。"
         "如果 request.deliverables 非空，必须严格服从这些交付物，不得增加其他最终工具。"
         "不要执行工具。deliverables 仅允许 evidence、insights、risk_audit、report、creative。goal 必须原样复制。"
+        "response_mode=answer 表示用户在询问视频内容，分析完成后应直接回答原问题；"
+        "response_mode=artifact 表示用户明确要求报告、分析、证据、脚本等可下载交付物。"
+        "不要依赖固定关键词，按用户语义和期望的最终结果判断。"
     )
     payload = {
         "model": settings.insight.served_model,

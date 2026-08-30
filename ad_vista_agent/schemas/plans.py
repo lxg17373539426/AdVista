@@ -64,7 +64,8 @@ class AnalysisPlan(BaseModel):
     goal: str
     mode: str = "quick"
     steps: list[PlanStep]
-    deliverables: list[str]
+    deliverables: list[str] = Field(default_factory=list)
+    response_mode: str = Field(default="artifact", pattern=r"^(answer|artifact)$")
     max_tool_calls: int = Field(default=20, ge=1)
     requires_confirmation: list[str] = Field(default_factory=list)
 

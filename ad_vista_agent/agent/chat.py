@@ -75,13 +75,17 @@ def _context(
     evidence_path = ledger_dir / "evidence.jsonl"
     clusters_path = ledger_dir / "clusters.jsonl"
     analysis_path = (artifact_root or run_dir) / "insights" / "analysis.json"
-    missing = [path for path in (evidence_path, clusters_path, analysis_path) if not path.is_file()]
+    missing = [path for path in (evidence_path, clusters_path) if not path.is_file()]
     if missing:
         names = ", ".join(str(path) for path in missing)
         raise FileNotFoundError(f"Chat requires existing Ledger and insight artifacts; missing: {names}")
     evidence = _load_jsonl(evidence_path, Evidence)
     clusters = _load_jsonl(clusters_path, EvidenceCluster)
-    analysis = MarketingAnalysis.model_validate(json.loads(analysis_path.read_text(encoding="utf-8")))
+    analysis = (
+        MarketingAnalysis.model_validate(json.loads(analysis_path.read_text(encoding="utf-8")))
+        if analysis_path.is_file()
+        else None
+    )
     speech = [
         {
             "id": item.evidence_id,
@@ -125,7 +129,7 @@ def _context(
             ]
     allowed.update(item["id"] for item in visual_frames)
     return {
-        "asset_id": analysis.asset_id,
+        "asset_id": analysis.asset_id if analysis is not None else (evidence[0].asset_id if evidence else ""),
         "speech_evidence": speech,
         "ocr_clusters": ocr_clusters,
         "validated_insights": [
@@ -136,9 +140,9 @@ def _context(
                 "evidence_refs": item.evidence_refs,
                 "epistemic_status": item.epistemic_status.value,
             }
-            for item in analysis.insights
+            for item in (analysis.insights if analysis is not None else [])
         ],
-        "unknowns": analysis.unknowns,
+        "unknowns": analysis.unknowns if analysis is not None else [],
         "visual_keyframes": visual_frames,
         "visual_observations": visual_observations,
     }, allowed
@@ -283,20 +287,6 @@ def _is_greeting(question: str) -> bool:
     return normalized in {"你好", "您好", "嗨", "hi", "hello", "在吗", "你是谁"}
 
 
-def _needs_visual_context(question: str) -> bool:
-    value = question.casefold()
-    return any(
-        term in value
-        for term in (
-            "颜色", "什么色", "外观", "长什么样", "款式", "形状", "画面", "镜头",
-            "包装", "logo", "标志", "人物", "模特", "男", "女", "男性", "女性", "性别",
-            "穿着", "鞋", "衣服", "材质", "质地",
-            "整个视频", "完整视频", "逐镜头", "发生了什么", "过程", "动作", "变化", "开头", "结尾",
-            "color", "look", "visual", "material", "scene", "video",
-        )
-    )
-
-
 def _is_creative_request(question: str) -> bool:
     value = question.casefold()
     return any(term in value for term in ("脚本", "分镜", "hook", "钩子", "a/b", "ab 版本", "广告文案"))
@@ -377,6 +367,8 @@ def _seed_conversation(
     if history:
         return history
     conversations.add_message(state.session_id, "user", state.request.goal, [])
+    if state.plan.response_mode == "answer":
+        return conversations.messages(state.session_id)
     generated = {
         "evidence": "证据提取",
         "insights": "卖点分析",
@@ -773,10 +765,8 @@ def ask_agent(
             epistemic_status="conversational",
         )
     else:
-        include_images = _needs_visual_context(value)
-        image_frames = (
-            _relevant_keyframes(value, context, settings.insight.max_images_per_prompt)
-            if include_images else []
+        image_frames = _relevant_keyframes(
+            value, context, settings.insight.max_images_per_prompt
         )
         raw_answer = _qwen_answer(
                 value,
@@ -784,7 +774,7 @@ def ask_agent(
                 history,
                 settings,
                 run_dir=run_dir,
-                include_images=include_images,
+                include_images=True,
                 image_frames=image_frames,
             )
         answer = normalize_conversation_answer(raw_answer)
@@ -798,10 +788,19 @@ def ask_agent(
         }
         allowed_refs = {
             ref for ref in allowed_refs if not ref.startswith("kf_")
-        } | observed_keyframe_refs | (keyframe_refs if include_images else set())
+        } | observed_keyframe_refs | keyframe_refs
     validate_conversation_answer(answer, allowed_refs)
     answer = answer.model_copy(update={"answer": _strip_evidence_ids(answer.answer)})
-    user_message_id = conversations.add_message(state.session_id, "user", value, [])
+    seeded_question = bool(
+        len(history) == 1
+        and history[0].get("role") == "user"
+        and history[0].get("content") == value
+    )
+    user_message_id = (
+        str(history[0]["message_id"])
+        if seeded_question
+        else conversations.add_message(state.session_id, "user", value, [])
+    )
     assistant_message_id = conversations.add_message(
         state.session_id,
         "assistant",

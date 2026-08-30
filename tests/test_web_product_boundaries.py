@@ -173,11 +173,43 @@ def test_relevant_keyframes_use_visual_text_and_temporal_fallback() -> None:
     assert _relevant_keyframes("完整介绍一下", context) == frames
 
 
-def test_gender_questions_use_visual_context() -> None:
-    from ad_vista_agent.agent.chat import _needs_visual_context
+def test_planner_response_mode_controls_uploaded_video_result() -> None:
+    script = (STATIC / "app.js").read_text(encoding="utf-8")
+    planner = (STATIC.parents[1] / "agent" / "planner.py").read_text(encoding="utf-8")
+    assert "response_mode" in planner
+    assert 'value.response_mode==="answer"' in script
+    assert "def _is_video_question" not in (STATIC.parents[1] / "web" / "service.py").read_text(encoding="utf-8")
+    assert "response_mode=answer" in planner
 
-    assert _needs_visual_context("这个模特是男的还是女的？")
-    assert _needs_visual_context("视频中的人物性别是什么")
+
+def test_answer_plan_has_no_artifact_deliverables() -> None:
+    from ad_vista_agent.agent.planner import PlannerDecision, compile_decision
+    from ad_vista_agent.schemas import AgentRequest
+
+    request = AgentRequest(goal="这个模特是男生还是女生呢？")
+    decision = PlannerDecision(
+        goal=request.goal,
+        selected_tools=["ingest", "timeline", "speech", "ocr", "ledger"],
+        deliverables=["insights", "report"],
+        response_mode="answer",
+    )
+
+    plan = compile_decision(decision, request)
+    assert plan.response_mode == "answer"
+    assert plan.deliverables == []
+    assert [step.tool for step in plan.steps] == ["ingest", "timeline", "speech", "ocr", "ledger"]
+
+
+def test_video_chat_can_use_ledger_without_insight_artifact() -> None:
+    chat = (STATIC.parents[1] / "agent" / "chat.py").read_text(encoding="utf-8")
+    assert "if analysis_path.is_file()" in chat
+    assert "analysis.asset_id if analysis is not None" in chat
+
+
+def test_video_chat_always_receives_selected_keyframes() -> None:
+    chat = (STATIC.parents[1] / "agent" / "chat.py").read_text(encoding="utf-8")
+    assert "def _needs_visual_context" not in chat
+    assert "include_images=True" in chat
 
 
 def test_blank_conversation_references_are_removed_before_validation() -> None:
