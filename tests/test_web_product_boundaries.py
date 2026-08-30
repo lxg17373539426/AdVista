@@ -200,6 +200,24 @@ def test_answer_plan_has_no_artifact_deliverables() -> None:
     assert [step.tool for step in plan.steps] == ["ingest", "timeline", "speech", "ocr", "ledger"]
 
 
+def test_answer_plan_cannot_run_artifact_tools() -> None:
+    from ad_vista_agent.agent.planner import PlannerDecision, compile_decision
+    from ad_vista_agent.schemas import AgentRequest
+
+    request = AgentRequest(goal="这个视频的模特是男的还是女的")
+    decision = PlannerDecision(
+        goal=request.goal,
+        selected_tools=["ingest", "timeline", "speech", "ocr", "ledger", "insights", "report"],
+        deliverables=["insights", "report"],
+        response_mode="answer",
+    )
+
+    plan = compile_decision(decision, request)
+    assert plan.response_mode == "answer"
+    assert plan.deliverables == []
+    assert [step.tool for step in plan.steps] == ["ingest", "timeline", "speech", "ocr", "ledger"]
+
+
 def test_video_chat_can_use_ledger_without_insight_artifact() -> None:
     chat = (STATIC.parents[1] / "agent" / "chat.py").read_text(encoding="utf-8")
     assert "if analysis_path.is_file()" in chat

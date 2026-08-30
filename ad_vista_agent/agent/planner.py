@@ -23,6 +23,7 @@ TOOL_DEPENDENCIES: dict[str, set[str]] = {
 }
 ALLOWED_DELIVERABLES = {"evidence", "insights", "risk_audit", "report", "creative"}
 CANONICAL_TOOL_ORDER = ("ingest", "timeline", "speech", "ocr", "ledger", "insights", "report", "creative")
+ANSWER_TOOLS = {"ingest", "timeline", "speech", "ocr", "ledger"}
 DELIVERABLE_TOOL = {
     "evidence": "ledger",
     "insights": "insights",
@@ -105,7 +106,12 @@ def compile_decision(decision: PlannerDecision, request: AgentRequest) -> Analys
         response_mode = "artifact"
     else:
         response_mode = decision.response_mode
-        deliverables = [] if response_mode == "answer" else list(decision.deliverables)[:1]
+        if response_mode == "answer":
+            # Direct video answers need evidence and frames, never artifact builders.
+            selected &= ANSWER_TOOLS
+            deliverables = []
+        else:
+            deliverables = list(decision.deliverables)[:1]
     return _build_plan(
         request,
         deliverables,
