@@ -230,6 +230,16 @@ def test_video_chat_always_receives_selected_keyframes() -> None:
     assert "include_images=True" in chat
 
 
+def test_video_chat_prioritizes_latest_question_and_samples_full_video() -> None:
+    from ad_vista_agent.agent.chat import _relevant_keyframes
+
+    frames = [{"id": f"kf_{index:04d}", "artifact_path": f"{index}.jpg"} for index in range(10)]
+    selected = _relevant_keyframes("这个视频展示的产品是什么", {"visual_keyframes": frames}, 4)
+    assert [item["id"] for item in selected] == ["kf_0000", "kf_0003", "kf_0006", "kf_0009"]
+    chat = (STATIC.parents[1] / "agent" / "chat.py").read_text(encoding="utf-8")
+    assert "QUESTION 是用户本轮最新问题" in chat
+
+
 def test_blank_conversation_references_are_removed_before_validation() -> None:
     from ad_vista_agent.agent.chat import normalize_conversation_answer, validate_conversation_answer
     from ad_vista_agent.schemas import ConversationAnswer

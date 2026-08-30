@@ -501,7 +501,14 @@ def _relevant_keyframes(
     else:
         selected = []
     if not selected and not any(score > 0 for score, _, _ in scored):
-        return [frames[0], frames[-1]][:limit]
+        # Text matching can miss products shown only in a middle shot.
+        # Sample the whole video instead of anchoring on its endpoints.
+        if limit >= len(frames):
+            return frames
+        if limit == 1:
+            return [frames[len(frames) // 2]]
+        indexes = [round(index * (len(frames) - 1) / (limit - 1)) for index in range(limit)]
+        return [frames[index] for index in dict.fromkeys(indexes)]
     for _, _, frame in sorted(scored, key=lambda item: (-item[0], -item[1])):
         if frame not in selected:
             selected.append(frame)
@@ -591,6 +598,7 @@ def _qwen_answer(
         "材质和成分不能仅凭外观确认；可以描述视觉上像什么，但必须说明无法确认真实材质。"
         "不得把广告声明写成独立验证的客观事实，不得编造价格、成分、受众属性或视频内容。"
         "不要在 answer 正文中输出 speech_*、ocr_cluster_*、kf_* 等内部证据 ID，只放在 evidence_refs 字段。"
+        "QUESTION 是用户本轮最新问题，必须优先重新检查当前视频后回答；会话历史仅用于理解指代，历史回答不是证据，不能机械重复。"
     )
     if intent == "marketing":
         prompt += (
