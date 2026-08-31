@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
+import uuid
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -98,9 +100,17 @@ def build_report(
 
     critic_dir = output_root / "critic"
     report_dir = output_root / "report"
+    staging_root = output_root / f".stage_7_{uuid.uuid4().hex}"
+    staging_critic_dir = staging_root / "critic"
+    staging_report_dir = staging_root / "report"
+    staging_critic_dir.mkdir(parents=True, exist_ok=True)
+    staging_report_dir.mkdir(parents=True, exist_ok=True)
     audit_path = critic_dir / "audit.json"
     markdown_path = report_dir / "report.md"
     html_path = report_dir / "report.html"
+    staged_audit_path = staging_critic_dir / "audit.json"
+    staged_markdown_path = staging_report_dir / "report.md"
+    staged_html_path = staging_report_dir / "report.html"
     metrics_path = output_root / "stage_7_metrics.json"
     manifest_path = output_root / "manifest.json"
     analysis = MarketingAnalysis.model_validate(store.read_json(analysis_path))
@@ -165,10 +175,12 @@ def build_report(
         max_evidence_per_insight=settings.report.max_evidence_per_insight,
         source_name=source_name,
     )
-    store.write_json(audit_path, audit)
-    report_dir.mkdir(parents=True, exist_ok=True)
-    markdown_path.write_text(markdown, encoding="utf-8")
-    html_path.write_text(html, encoding="utf-8")
+    store.write_json(staged_audit_path, audit)
+    staged_markdown_path.write_text(markdown, encoding="utf-8")
+    staged_html_path.write_text(html, encoding="utf-8")
+    store.publish_directory(staging_critic_dir, critic_dir)
+    store.publish_directory(staging_report_dir, report_dir)
+    shutil.rmtree(staging_root, ignore_errors=True)
     total_seconds = time.perf_counter() - total_started
     metrics = {
         "schema_version": settings.project.schema_version,

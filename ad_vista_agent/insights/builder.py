@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import shutil
+import uuid
 import time
 from pathlib import Path
 from typing import Any, TypeVar
@@ -273,9 +275,15 @@ def build_insights(
     prompt_path = Path(__file__).resolve().parents[1] / "resources" / "marketing_insights.txt"
     output_root = artifact_root or run_dir
     output_dir = output_root / "insights"
-    raw_path = output_dir / "raw_response.json"
-    visual_observations_path = output_dir / "visual_observations.json"
-    analysis_path = output_dir / "analysis.json"
+    staging_root = output_root / f".stage_6_{uuid.uuid4().hex}"
+    staging_dir = staging_root / "insights"
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = staging_dir / "raw_response.json"
+    visual_observations_path = staging_dir / "visual_observations.json"
+    analysis_path = staging_dir / "analysis.json"
+    published_raw_path = output_dir / "raw_response.json"
+    published_visual_observations_path = output_dir / "visual_observations.json"
+    published_analysis_path = output_dir / "analysis.json"
     metrics_path = output_root / "stage_6_metrics.json"
     manifest_path = output_root / "manifest.json"
     max_insights = settings.insight.max_insights_per_dimension
@@ -304,17 +312,17 @@ def build_insights(
         **{item.keyframe_id: f"关键画面 {item.shot_id}" for item in keyframes},
     }
 
-    if not force and analysis_path.is_file() and metrics_path.is_file() and visual_observations_path.is_file():
+    if not force and published_analysis_path.is_file() and metrics_path.is_file() and published_visual_observations_path.is_file() and published_raw_path.is_file():
         metrics = store.read_json(metrics_path)
         artifact_hashes = metrics.get("artifact_sha256")
         if (
             metrics.get("cache_key") == cache_key
             and isinstance(artifact_hashes, dict)
-            and artifact_hashes.get("analysis") == sha256_file(analysis_path)
-            and artifact_hashes.get("visual_observations") == sha256_file(visual_observations_path)
-            and artifact_hashes.get("raw_response") == sha256_file(raw_path)
+            and artifact_hashes.get("analysis") == sha256_file(published_analysis_path)
+            and artifact_hashes.get("visual_observations") == sha256_file(published_visual_observations_path)
+            and artifact_hashes.get("raw_response") == sha256_file(published_raw_path)
         ):
-            analysis = MarketingAnalysis.model_validate(store.read_json(analysis_path))
+            analysis = MarketingAnalysis.model_validate(store.read_json(published_analysis_path))
             validate_analysis_grounding(
                 analysis,
                 asset_id=ledger.asset_id,
@@ -325,7 +333,7 @@ def build_insights(
             grounded_summary = grounded_executive_summary(analysis)
             if analysis.executive_summary != grounded_summary:
                 analysis = analysis.model_copy(update={"executive_summary": grounded_summary})
-                store.write_json(analysis_path, analysis)
+                store.write_json(published_analysis_path, analysis)
             return {
                 "status": "ok",
                 "cache_hit": True,
@@ -458,6 +466,13 @@ def build_insights(
             "visual_observations": sha256_file(visual_observations_path),
             "raw_response": sha256_file(raw_path),
         },
+    }
+    store.publish_directory(staging_dir, output_dir)
+    shutil.rmtree(staging_root, ignore_errors=True)
+    metrics["artifact_sha256"] = {
+            "analysis": sha256_file(published_analysis_path),
+            "visual_observations": sha256_file(published_visual_observations_path),
+            "raw_response": sha256_file(published_raw_path),
     }
     store.write_json(metrics_path, metrics)
     manifest: dict[str, Any] = (

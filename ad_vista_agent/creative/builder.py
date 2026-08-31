@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
+import uuid
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -116,7 +118,11 @@ def build_creative(
     output_root = artifact_root or run_dir
     context, allowed_refs, source_paths = _load_context(run_dir, artifact_root)
     output_dir = output_root / "creative"
+    staging_root = output_root / f".stage_11_{uuid.uuid4().hex}"
+    staging_dir = staging_root / "creative"
+    staging_dir.mkdir(parents=True, exist_ok=True)
     package_path = output_dir / "package.json"
+    staged_package_path = staging_dir / "package.json"
     metrics_path = output_root / "stage_11_metrics.json"
     cache_payload = {
         "stage": "stage_11_creative",
@@ -202,17 +208,19 @@ def build_creative(
         _validate_grounding(package, allowed_refs)
     except Exception as exc:
         raise ValueError(f"Qwen creative output remained invalid after repair: {exc}") from exc
-    store.write_json(package_path, package)
+    store.write_json(staged_package_path, package)
     store.write_json(
-        output_dir / "hooks.json",
+        staging_dir / "hooks.json",
         {"hooks": [item.model_dump(mode="json") for item in package.hooks]},
     )
-    store.write_json(output_dir / "script.json", package.script)
-    store.write_json(output_dir / "storyboard.json", package.storyboard)
+    store.write_json(staging_dir / "script.json", package.script)
+    store.write_json(staging_dir / "storyboard.json", package.storyboard)
     store.write_json(
-        output_dir / "ab_plan.json",
+        staging_dir / "ab_plan.json",
         {"variants": [item.model_dump(mode="json") for item in package.ab_variants]},
     )
+    store.publish_directory(staging_dir, output_dir)
+    shutil.rmtree(staging_root, ignore_errors=True)
     metrics = {
         "stage": "stage_11_creative",
         "cache_key": cache_key,
@@ -229,7 +237,7 @@ def build_creative(
         },
         "total_seconds": round(time.perf_counter() - started, 6),
         "artifact_sha256": {
-            "package": sha256_file(package_path),
+            "package": sha256_file(output_dir / "package.json"),
             "hooks": sha256_file(output_dir / "hooks.json"),
             "script": sha256_file(output_dir / "script.json"),
             "storyboard": sha256_file(output_dir / "storyboard.json"),
