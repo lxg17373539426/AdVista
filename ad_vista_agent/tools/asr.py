@@ -10,6 +10,7 @@ from typing import Any
 from ad_vista_agent.schemas.speech import TranscriptSegment
 
 from .base import Tool, ToolContext
+from ad_vista_agent.runtime.process import ProcessCancelled, run_process
 
 
 @dataclass(frozen=True)
@@ -46,14 +47,14 @@ class FasterWhisperTool(Tool):
             str(request_path),
         ]
         try:
-            result = subprocess.run(
+            result = run_process(
                 command,
-                capture_output=True,
-                text=True,
                 timeout=self.timeout_seconds,
-                check=False,
                 env=environment,
+                cancel_event=context.cancel_event,
             )
+        except ProcessCancelled as exc:
+            raise RuntimeError("Faster-Whisper cancelled") from exc
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"Faster-Whisper timed out after {self.timeout_seconds}s") from exc
         finally:

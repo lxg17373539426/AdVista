@@ -5,11 +5,13 @@ import os
 import subprocess
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .base import Tool, ToolContext
+from ad_vista_agent.runtime.process import ProcessCancelled, run_process
 
 
 MAX_IMAGES_PER_PROMPT = 8
@@ -151,8 +153,9 @@ class QwenInsightTool(Tool):
             raise FileNotFoundError(self.python_executable)
         insight_dir = context.run_dir / "insights"
         insight_dir.mkdir(parents=True, exist_ok=True)
-        request_path = insight_dir / "qwen_request.json"
-        response_path = insight_dir / "qwen_response.json"
+        call_id = uuid.uuid4().hex
+        request_path = insight_dir / f"qwen_request_{call_id}.json"
+        response_path = insight_dir / f"qwen_response_{call_id}.json"
         payload = dict(arguments)
         payload["response_path"] = str(response_path)
         request_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -167,13 +170,11 @@ class QwenInsightTool(Tool):
             str(request_path),
         ]
         try:
-            result = subprocess.run(
+            result = run_process(
                 command,
-                capture_output=True,
-                text=True,
                 timeout=self.timeout_seconds,
-                check=False,
                 env=environment,
+                cancel_event=context.cancel_event,
             )
             if result.returncode != 0:
                 raise RuntimeError(f"Qwen insight inference failed: {result.stderr.strip()[-4000:]}")
@@ -188,6 +189,8 @@ class QwenInsightTool(Tool):
                 completion_tokens=int(response["completion_tokens"]),
                 versions={str(key): str(value) for key, value in response["versions"].items()},
             )
+        except ProcessCancelled as exc:
+            raise RuntimeError("Qwen insight inference cancelled") from exc
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"Qwen insight inference timed out after {self.timeout_seconds}s") from exc
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:

@@ -142,6 +142,16 @@ class WebConfig(BaseModel):
     port: int = Field(default=8080, ge=1, le=65535)
     max_upload_bytes: int = Field(default=1_073_741_824, ge=1_048_576)
     analysis_workers: int = Field(default=1, ge=1, le=4)
+    api_token: str | None = Field(default=None, min_length=16)
+    max_video_duration_seconds: int = Field(default=600, ge=1)
+    max_video_pixels: int = Field(default=8_294_400, ge=1)
+    max_active_jobs: int = Field(default=4, ge=1)
+
+    @model_validator(mode="after")
+    def require_token_for_remote_host(self) -> "WebConfig":
+        if self.host not in {"127.0.0.1", "localhost", "::1"} and not self.api_token:
+            raise ValueError("web.api_token is required when web.host is not local")
+        return self
 
 
 class AgentConfig(BaseModel):

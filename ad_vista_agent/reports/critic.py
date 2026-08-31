@@ -38,6 +38,7 @@ HIGH_RISK_TERMS = (
     "临床",
     "保证",
 )
+SENSITIVE_IDENTITY_TERMS = ("真实性别", "跨性别", "性别流动")
 
 
 def _report_evidence_from_source(reference_id: str, source: Evidence, member_count: int) -> ReportEvidence:
@@ -133,6 +134,15 @@ def _insight_findings(
     run_dir: Path,
 ) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
+    if any(term in insight.claim or term in insight.reasoning_summary for term in SENSITIVE_IDENTITY_TERMS):
+        findings.append(
+            AuditFinding(
+                code="sensitive_identity_inference",
+                severity=AuditSeverity.ERROR,
+                message="不得根据外貌、妆容或服饰推断人物的真实敏感身份。",
+                evidence_refs=insight.evidence_refs,
+            )
+        )
     for item in expanded:
         findings.extend(_artifact_findings(item, run_dir))
         if item.end_ms > duration_ms:

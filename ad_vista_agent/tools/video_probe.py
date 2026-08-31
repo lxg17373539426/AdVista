@@ -9,6 +9,7 @@ from typing import Any
 from ad_vista_agent.schemas.assets import AudioStream, MediaMetadata, VideoStream
 
 from .base import Tool, ToolContext
+from ad_vista_agent.runtime.process import ProcessCancelled, run_process
 
 
 def _optional_int(value: Any) -> int | None:
@@ -44,7 +45,6 @@ class VideoProbeTool(Tool):
         self.timeout_seconds = timeout_seconds
 
     def run(self, context: ToolContext, arguments: dict[str, Any]) -> MediaMetadata:
-        del context
         video_path = Path(str(arguments["video_path"])).expanduser().resolve()
         if not video_path.is_file():
             raise FileNotFoundError(video_path)
@@ -60,17 +60,17 @@ class VideoProbeTool(Tool):
             str(video_path),
         ]
         try:
-            result = subprocess.run(
+            result = run_process(
                 command,
-                capture_output=True,
-                text=True,
                 timeout=self.timeout_seconds,
-                check=False,
+                cancel_event=context.cancel_event,
             )
         except FileNotFoundError as exc:
             raise RuntimeError(f"ffprobe executable not found: {self.executable}") from exc
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"ffprobe timed out after {self.timeout_seconds}s: {video_path}") from exc
+        except ProcessCancelled as exc:
+            raise RuntimeError(f"ffprobe cancelled: {video_path}") from exc
 
         if result.returncode != 0:
             message = result.stderr.strip() or "unknown ffprobe error"

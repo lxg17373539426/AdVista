@@ -52,6 +52,7 @@ def validate_analysis_grounding(
     asset_id: str,
     allowed_references: set[str],
     max_per_dimension: int,
+    reference_content: dict[str, str] | None = None,
 ) -> None:
     if analysis.asset_id != asset_id:
         raise ValueError("Marketing analysis belongs to another asset")
@@ -63,10 +64,26 @@ def validate_analysis_grounding(
     if excessive:
         raise ValueError(f"Too many insights for dimensions: {sorted(excessive)}")
     for item in analysis.insights:
+        if item.dimension == MarketingDimension.AUDIENCE and any(
+            term in (item.claim + " " + item.reasoning_summary)
+            for term in ("真实性别", "跨性别", "性别流动")
+        ):
+            raise ValueError(
+                f"Insight {item.insight_id} infers a person's gender identity from advertising evidence"
+            )
         unknown = set(item.evidence_refs) - allowed_references
         if unknown:
             raise ValueError(
                 f"Insight {item.insight_id} cites unknown evidence: {sorted(unknown)}"
+            )
+        if not _claim_has_source_overlap(
+            item.claim,
+            item.evidence_refs,
+            allowed_references,
+            reference_content or {},
+        ):
+            raise ValueError(
+                f"Insight {item.insight_id} cites evidence with no obvious lexical support"
             )
         mentioned = set(INLINE_CITATION_PATTERN.findall(item.claim + " " + item.reasoning_summary))
         if mentioned:
@@ -75,3 +92,32 @@ def validate_analysis_grounding(
             )
     if any(not value.startswith("当前 Ledger 无证据表明") for value in analysis.unknowns):
         raise ValueError("Each unknown must state that the current Ledger lacks evidence")
+
+
+def _claim_terms(value: str) -> set[str]:
+    lowered = value.casefold()
+    terms = set(re.findall(r"[a-z0-9]{2,}", lowered))
+    chinese = "".join(re.findall(r"[\u4e00-\u9fff]", lowered))
+    terms.update(chinese[index : index + 2] for index in range(max(0, len(chinese) - 1)))
+    return {term for term in terms if term not in {"当前", "视频", "广告", "画面", "展示"}}
+
+
+def _claim_has_source_overlap(
+    claim: str,
+    references: list[str],
+    allowed_references: set[str],
+    reference_content: dict[str, str],
+) -> bool:
+    if any(reference.startswith("kf_") for reference in references):
+        return True
+    claim_terms = _claim_terms(claim)
+    if not claim_terms:
+        return True
+    source_terms: set[str] = set()
+    for reference in references:
+        if reference not in allowed_references:
+            continue
+        source_terms.update(_claim_terms(reference_content.get(reference, "")))
+    # This is a conservative contradiction guard, not a full entailment proof.
+    # Abstract marketing inferences may use different wording from their sources.
+    return bool(claim_terms.intersection(source_terms))

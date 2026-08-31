@@ -32,7 +32,7 @@ from .grounding import (
 from .payload import build_ledger_payload
 
 
-INSIGHT_PIPELINE_VERSION = "5"
+INSIGHT_PIPELINE_VERSION = "6"
 QWEN_VERSIONS = {"vllm": "0.19.1", "torch": "2.10.0", "transformers": "5.13.0"}
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -298,16 +298,29 @@ def build_insights(
     allowed_refs = {
         item.evidence_id for item in evidence if item.modality.value == "speech"
     } | {item.cluster_id for item in clusters} | {item.keyframe_id for item in keyframes}
+    reference_content = {
+        **{item.evidence_id: item.content for item in evidence},
+        **{item.cluster_id: item.canonical_content for item in clusters},
+        **{item.keyframe_id: f"关键画面 {item.shot_id}" for item in keyframes},
+    }
 
     if not force and analysis_path.is_file() and metrics_path.is_file() and visual_observations_path.is_file():
         metrics = store.read_json(metrics_path)
-        if metrics.get("cache_key") == cache_key:
+        artifact_hashes = metrics.get("artifact_sha256")
+        if (
+            metrics.get("cache_key") == cache_key
+            and isinstance(artifact_hashes, dict)
+            and artifact_hashes.get("analysis") == sha256_file(analysis_path)
+            and artifact_hashes.get("visual_observations") == sha256_file(visual_observations_path)
+            and artifact_hashes.get("raw_response") == sha256_file(raw_path)
+        ):
             analysis = MarketingAnalysis.model_validate(store.read_json(analysis_path))
             validate_analysis_grounding(
                 analysis,
                 asset_id=ledger.asset_id,
                 allowed_references=allowed_refs,
                 max_per_dimension=max_insights,
+                reference_content=reference_content,
             )
             grounded_summary = grounded_executive_summary(analysis)
             if analysis.executive_summary != grounded_summary:
@@ -403,6 +416,7 @@ def build_insights(
         asset_id=ledger.asset_id,
         allowed_references=allowed_refs,
         max_per_dimension=max_insights,
+        reference_content=reference_content,
     )
     analysis = analysis.model_copy(
         update={"executive_summary": grounded_executive_summary(analysis)}
@@ -439,6 +453,11 @@ def build_insights(
         "inference_seconds": round(inference_seconds, 6),
         "total_seconds": round(total_seconds, 6),
         "versions": result.versions,
+        "artifact_sha256": {
+            "analysis": sha256_file(analysis_path),
+            "visual_observations": sha256_file(visual_observations_path),
+            "raw_response": sha256_file(raw_path),
+        },
     }
     store.write_json(metrics_path, metrics)
     manifest: dict[str, Any] = (

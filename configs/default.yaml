@@ -88,6 +88,10 @@ web:
   port: 8080
   max_upload_bytes: 1073741824
   analysis_workers: 1
+  api_token: null
+  max_video_duration_seconds: 600
+  max_video_pixels: 8294400
+  max_active_jobs: 4
 
 agent:
   backend: langgraph

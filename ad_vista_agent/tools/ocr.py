@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import Tool, ToolContext
+from ad_vista_agent.runtime.process import ProcessCancelled, run_process
 
 
 @dataclass(frozen=True)
@@ -43,14 +44,14 @@ class OcrWorkerTool(Tool):
         environment["CUDA_VISIBLE_DEVICES"] = self.cuda_visible_devices
         command = [str(self.python_executable), "-m", module, "--request", str(request_path)]
         try:
-            result = subprocess.run(
+            result = run_process(
                 command,
-                capture_output=True,
-                text=True,
                 timeout=self.timeout_seconds,
-                check=False,
                 env=environment,
+                cancel_event=context.cancel_event,
             )
+        except ProcessCancelled as exc:
+            raise RuntimeError(f"{backend} cancelled") from exc
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"{backend} timed out after {self.timeout_seconds}s") from exc
         finally:

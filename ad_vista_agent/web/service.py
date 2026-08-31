@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import urllib.error
 import urllib.request
@@ -24,6 +25,7 @@ from ad_vista_agent.config import Settings
 from ad_vista_agent.creative.builder import build_creative
 from ad_vista_agent.runtime import ArtifactStore
 from ad_vista_agent.schemas import AgentRequest
+from ad_vista_agent.tools import ToolContext, VideoProbeTool
 
 
 LOGGER = logging.getLogger(__name__)
@@ -50,6 +52,34 @@ class WebService:
         with self.guard:
             return self.locks.setdefault(run_id, threading.RLock())
 
+    def allowed_media_path(self, path: Path) -> Path:
+        candidate = path.expanduser().resolve()
+        roots = [
+            self.settings.paths.video_data.expanduser().resolve(),
+            (self.settings.paths.output_root / "uploads").resolve(),
+        ]
+        if not any(candidate == root or candidate.is_relative_to(root) for root in roots):
+            raise ValueError("Media path is outside configured media roots")
+        if not candidate.is_file():
+            raise FileNotFoundError(candidate)
+        return candidate
+
+    def validate_uploaded_video(self, path: Path) -> None:
+        path = self.allowed_media_path(path)
+        metadata = VideoProbeTool(
+            self.settings.tools.ffprobe_executable,
+            self.settings.tools.probe_timeout_seconds,
+        ).run(ToolContext(run_id="upload_validation", run_dir=path.parent), {"video_path": path})
+        if metadata.duration_ms > self.settings.web.max_video_duration_seconds * 1000:
+            raise ValueError(
+                f"Video duration exceeds {self.settings.web.max_video_duration_seconds} seconds"
+            )
+        if any(
+            stream.width * stream.height > self.settings.web.max_video_pixels
+            for stream in metadata.video_streams
+        ):
+            raise ValueError("Video resolution exceeds configured limit")
+
     def _job_path(self, job_id: str) -> Path:
         if not job_id.startswith("job_") or any(
             char not in "abcdefghijklmnopqrstuvwxyz0123456789_" for char in job_id
@@ -70,10 +100,28 @@ class WebService:
             if not job_id:
                 continue
             if job.get("status") in {"queued", "running", "cancelling"}:
-                job.update(
-                    status="failed",
-                    error="Web 服务重启导致任务中断，请重新提交。",
+                execution_id = str(job.get("execution_id", ""))
+                session_path = (
+                    self.store.execution_dir(execution_id) / "session.json"
+                    if execution_id.startswith("exec_")
+                    else None
                 )
+                session = None
+                if session_path is not None and session_path.is_file():
+                    try:
+                        session = self.store.read_json(session_path)
+                    except (OSError, ValueError, json.JSONDecodeError):
+                        session = None
+                session_status = str(session.get("status", "")) if session else ""
+                if session_status in {"completed", "waiting_confirmation", "failed", "cancelled"}:
+                    job["status"] = session_status
+                    job["result"] = session
+                    job.pop("error", None)
+                else:
+                    job.update(
+                        status="failed",
+                        error="Web 服务重启导致任务中断，请重新提交。",
+                    )
                 self.store.write_json(path, job)
             self.jobs[job_id] = job
 
@@ -81,6 +129,17 @@ class WebService:
         with self.guard:
             self.jobs[job_id].update(changes)
             self._persist_job(self.jobs[job_id])
+
+    def _log_job(self, level: int, message: str, job: dict[str, Any]) -> None:
+        LOGGER.log(
+            level,
+            message,
+            extra={
+                "job_id": job.get("job_id"),
+                "execution_id": job.get("execution_id"),
+                "run_id": job.get("asset_run_id") or job.get("run_id"),
+            },
+        )
 
     @staticmethod
     def _public_error(message: str) -> str:
@@ -99,9 +158,11 @@ class WebService:
         *,
         mode: str = "quick",
     ) -> dict[str, Any]:
+        video_path = self.allowed_media_path(video_path)
+        self.validate_uploaded_video(video_path)
         job_id = f"job_{uuid.uuid4().hex}"
         execution_id = f"exec_{uuid.uuid4().hex}"
-        deliverables = list(dict.fromkeys(deliverables))[:1]
+        deliverables = list(dict.fromkeys(deliverables))
         job = {
             "job_id": job_id,
             "execution_id": execution_id,
@@ -112,8 +173,15 @@ class WebService:
             "source_path": str(video_path),
         }
         with self.guard:
+            active = sum(
+                job.get("status") in {"queued", "running", "cancelling"}
+                for job in self.jobs.values()
+            )
+            if active >= self.settings.web.max_active_jobs:
+                raise RuntimeError("Too many active video jobs")
             self.jobs[job_id] = job
             self._persist_job(job)
+        self._log_job(logging.INFO, "Video job submitted", job)
         cancel_event = threading.Event()
         future = self.executor.submit(
             self._run,
@@ -241,6 +309,8 @@ class WebService:
                 self._update_job(job_id, status="cancelled")
                 return
             self._update_job(job_id, status="running")
+            job = self.jobs[job_id].copy()
+        self._log_job(logging.INFO, "Video job started", job)
         try:
             request = AgentRequest(goal=goal, deliverables=deliverables, mode=mode)
             registry = build_agent_registry(self.settings)
@@ -250,6 +320,7 @@ class WebService:
                 response_mode=plan.response_mode,
                 planned_deliverables=plan.deliverables,
             )
+            self._log_job(logging.INFO, "Video job plan created", self.jobs[job_id])
             result = run_agent(
                 video_path,
                 self.settings,
@@ -266,10 +337,12 @@ class WebService:
                 asset_run_id=result["run_id"],
                 result=result,
             )
+            self._log_job(logging.INFO, "Video job finished", self.jobs[job_id])
         except Exception as exc:
             detail = str(exc)[-4000:]
             LOGGER.exception("Video job %s failed: %s", job_id, detail)
             self._update_job(job_id, status="failed", error=self._public_error(detail))
+            self._log_job(logging.ERROR, "Video job failed", self.jobs[job_id])
 
     def job(self, job_id: str) -> dict[str, Any]:
         with self.guard:
@@ -473,8 +546,9 @@ class WebService:
                 state = None
                 artifact_root = run_dir
             asset = self.store.read_json(run_dir / "asset.json")
+            source_path = self.allowed_media_path(Path(asset["source_path"]))
             return build_creative(
-                Path(asset["source_path"]),
+                source_path,
                 self.settings,
                 request=state.request if state is not None else None,
                 artifact_root=artifact_root,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import re
+import unicodedata
 
 from ad_vista_agent.schemas import BoundingBox, OcrRegion
 
@@ -13,7 +14,18 @@ GROUNDING = re.compile(
 
 
 def _space(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip()
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", value)).strip()
+
+
+def ocr_quality_flags(value: str) -> list[str]:
+    flags: list[str] = []
+    if len(value.strip()) <= 1:
+        flags.append("short_text")
+    if "�" in value or any(marker in value for marker in ("Ã", "Â", "â")):
+        flags.append("possible_mojibake")
+    if not re.search(r"[\w\u4e00-\u9fff]", value, flags=re.UNICODE):
+        flags.append("no_alphanumeric_content")
+    return flags
 
 
 def parse_deepseek_grounding(raw: str) -> list[OcrRegion]:

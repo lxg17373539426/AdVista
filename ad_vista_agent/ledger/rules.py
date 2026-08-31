@@ -43,15 +43,37 @@ def region_iou(left: BoundingBox | None, right: BoundingBox | None) -> float:
 
 
 def _representative(members: list[Evidence]) -> Evidence:
+    def flags(item: Evidence) -> set[str]:
+        raw = item.metadata.get("quality_flags", [])
+        return {str(value) for value in raw} if isinstance(raw, list) else set()
+
     return max(
         members,
         key=lambda item: (
+            "possible_mojibake" not in flags(item),
+            "short_text" not in flags(item),
             item.confidence is not None,
             item.confidence if item.confidence is not None else -1.0,
             len(normalize_text(item.content)),
             -item.start_ms,
         ),
     )
+
+
+def _canonical_content(members: list[Evidence], representative: Evidence) -> str:
+    candidates = [item for item in members if item.content.strip()]
+    def flags(item: Evidence) -> set[str]:
+        raw = item.metadata.get("quality_flags", [])
+        return {str(value) for value in raw} if isinstance(raw, list) else set()
+
+    preferred = [
+        item
+        for item in candidates
+        if not {"possible_mojibake", "short_text"}.intersection(flags(item))
+    ]
+    if preferred:
+        return max(preferred, key=lambda item: (len(normalize_text(item.content)), item.confidence or 0)).content
+    return representative.content
 
 
 def build_ocr_clusters(
@@ -92,7 +114,7 @@ def build_ocr_clusters(
                 cluster_id=f"ocr_cluster_{index:04d}",
                 asset_id=representative.asset_id,
                 modality=EvidenceModality.OCR,
-                canonical_content=representative.content,
+                canonical_content=_canonical_content(members, representative),
                 start_ms=min(item.start_ms for item in members),
                 end_ms=max(item.end_ms for item in members),
                 representative_evidence_id=representative.evidence_id,

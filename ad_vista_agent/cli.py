@@ -524,3 +524,7 @@ def clean(
             "kept_run": keep_run if runs else None,
         }
     )
+
+
+if __name__ == "__main__":
+    app()

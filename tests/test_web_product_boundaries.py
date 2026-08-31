@@ -107,7 +107,7 @@ def test_marketing_requests_are_not_routed_to_generic_report() -> None:
 
     assert "def _is_marketing_request" in chat
     assert 'elif _is_direct_marketing_summary(value) or _is_marketing_request(value):' in chat
-    assert 'intent="marketing"' in chat
+    assert 'intent="answer" if direct_summary else "marketing"' in chat
     assert 'output_dir / "marketing.html"' in chat
     assert '"marketing-html"' in (STATIC.parents[1] / "web" / "app.py").read_text(encoding="utf-8")
     assert _is_marketing_request("我需要的是营销报告")

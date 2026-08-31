@@ -4,6 +4,7 @@ import json
 import mimetypes
 import os
 import re
+import secrets
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -173,6 +174,22 @@ class _Handler(BaseHTTPRequestHandler):
     def _error(self, status: int, message: str) -> None:
         self._send_json({"error": message}, status)
 
+    def _require_api_access(self, parts: list[str]) -> bool:
+        if not parts or parts[0] != "api":
+            return True
+        configured = self.settings.web.api_token
+        local = self.settings.web.host in {"127.0.0.1", "localhost", "::1"}
+        if local and not configured:
+            return True
+        supplied = self.headers.get("X-API-Key", "")
+        authorization = self.headers.get("Authorization", "")
+        if not supplied and authorization.startswith("Bearer "):
+            supplied = authorization[7:]
+        if configured and secrets.compare_digest(supplied, configured):
+            return True
+        self._send_json({"error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
+        return False
+
     def _stream_event(self, value: dict[str, object]) -> None:
         self.wfile.write((json.dumps(value, ensure_ascii=False) + "\n").encode("utf-8"))
         self.wfile.flush()
@@ -196,6 +213,8 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         try:
             parts, query = self._route()
+            if not self._require_api_access(parts):
+                return
             if not parts:
                 return self._send_file(self.static_root / "index.html", "text/html; charset=utf-8")
             if parts == ["api", "health"]:
@@ -226,7 +245,10 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._artifact_json(artifact_root, "creative/package.json")
                 if parts[3] == "media":
                     asset = self.service.store.read_json(_contained(run_dir, "asset.json"))
-                    return self._send_file(Path(asset["source_path"]), "video/mp4")
+                    return self._send_file(
+                        self.service.allowed_media_path(Path(asset["source_path"])),
+                        "video/mp4",
+                    )
                 if parts[3] == "keyframes" and len(parts) == 5:
                     return self._send_file(self._keyframe(run_dir, parts[4]), "image/jpeg")
                 if parts[3] == "exports" and len(parts) == 5:
@@ -276,6 +298,8 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             parts, _ = self._route()
+            if not self._require_api_access(parts):
+                return
             if parts == ["api", "uploads"]:
                 return self._upload()
             if parts == ["api", "chat"]:
@@ -388,6 +412,8 @@ class _Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         try:
             parts, _ = self._route()
+            if not self._require_api_access(parts):
+                return
             if parts[0:2] == ["api", "jobs"] and len(parts) == 3:
                 return self._send_json(self.service.cancel_job(parts[2]))
             return self._error(404, "Not found")
@@ -450,6 +476,7 @@ class _Handler(BaseHTTPRequestHandler):
             if target is None or temporary is None:
                 raise ValueError("Missing video upload")
             temporary.replace(target)
+            self.service.validate_uploaded_video(target)
         except Exception:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
@@ -457,28 +484,33 @@ class _Handler(BaseHTTPRequestHandler):
                 target.unlink(missing_ok=True)
             raise
         target.with_suffix(target.suffix + ".name").write_text(display_name, encoding="utf-8")
-        goal = fields.get("goal", "分析这个广告视频".encode("utf-8")).decode(
-            "utf-8", errors="replace"
-        )
-        mode = fields.get("mode", b"quick").decode("utf-8", errors="replace")
-        if mode not in {"quick", "deep"}:
-            raise ValueError("Mode must be quick or deep")
-        raw_deliverables = fields.get("deliverables", b"[]").decode(
-            "utf-8", errors="replace"
-        )
-        deliverables = json.loads(raw_deliverables)
-        if not isinstance(deliverables, list) or not all(
-            isinstance(item, str) for item in deliverables
-        ):
-            raise ValueError("Deliverables must be a JSON string array")
-        allowed = {"evidence", "insights", "risk_audit", "report", "creative"}
-        unknown = set(deliverables).difference(allowed)
-        if unknown:
-            raise ValueError(f"Unknown deliverables: {', '.join(sorted(unknown))}")
-        return self._send_json(
-            self.service.submit(target, goal, list(dict.fromkeys(deliverables)), mode=mode),
-            HTTPStatus.ACCEPTED,
-        )
+        try:
+            goal = fields.get("goal", "分析这个广告视频".encode("utf-8")).decode(
+                "utf-8", errors="replace"
+            )
+            mode = fields.get("mode", b"quick").decode("utf-8", errors="replace")
+            if mode not in {"quick", "deep"}:
+                raise ValueError("Mode must be quick or deep")
+            raw_deliverables = fields.get("deliverables", b"[]").decode(
+                "utf-8", errors="replace"
+            )
+            deliverables = json.loads(raw_deliverables)
+            if not isinstance(deliverables, list) or not all(
+                isinstance(item, str) for item in deliverables
+            ):
+                raise ValueError("Deliverables must be a JSON string array")
+            allowed = {"evidence", "insights", "risk_audit", "report", "creative"}
+            unknown = set(deliverables).difference(allowed)
+            if unknown:
+                raise ValueError(f"Unknown deliverables: {', '.join(sorted(unknown))}")
+            return self._send_json(
+                self.service.submit(target, goal, list(dict.fromkeys(deliverables)), mode=mode),
+                HTTPStatus.ACCEPTED,
+            )
+        except Exception:
+            target.unlink(missing_ok=True)
+            target.with_suffix(target.suffix + ".name").unlink(missing_ok=True)
+            raise
 
 
 def create_server(settings: Settings | None = None) -> ThreadingHTTPServer:

@@ -215,9 +215,12 @@ def _execute_state(
             state.error = "Agent execution cancelled"
             _write(store, state_dir, run_dir, state)
             return state.model_dump(mode="json")
-        if step.status == StepStatus.COMPLETED or any(
-            call.tool == step.tool and call.status == ToolCallStatus.COMPLETED
-            for call in state.tool_calls
+        if step.tool not in force_tools and (
+            step.status == StepStatus.COMPLETED
+            or any(
+                call.tool == step.tool and call.status == ToolCallStatus.COMPLETED
+                for call in state.tool_calls
+            )
         ):
             step.status = StepStatus.COMPLETED
             continue
@@ -247,6 +250,7 @@ def _execute_state(
                     source_path=state.source_path,
                     execution_dir=state_dir,
                     request=state.request,
+                    cancel_event=cancel_event,
                 ),
                 record.arguments,
             )
@@ -315,17 +319,22 @@ def run_agent(
 ) -> dict[str, Any]:
     if settings.agent.backend == "langgraph":
         from .langgraph_backend import run_langgraph_agent
+        store = ArtifactStore(settings.paths.output_root)
+        source = video_path.expanduser().resolve()
+        from ad_vista_agent.ingestion import ingest_video
 
-        return run_langgraph_agent(
-            video_path,
-            settings,
-            request,
-            plan=plan,
-            force_tools=force_tools,
-            registry=registry,
-            execution_id=execution_id,
-            cancel_event=cancel_event,
-        )
+        run_id = str(ingest_video(source, settings)["run_id"])
+        with store.lock(f"agent_{run_id}"):
+            return run_langgraph_agent(
+                source,
+                settings,
+                request,
+                plan=plan,
+                force_tools=force_tools,
+                registry=registry,
+                execution_id=execution_id,
+                cancel_event=cancel_event,
+            )
     source = video_path.expanduser().resolve()
     if not source.is_file():
         raise FileNotFoundError(source)
@@ -386,15 +395,16 @@ def resume_agent(
             state.confirmations.clear()
         if state.status == AgentRunStatus.COMPLETED:
             return state.model_dump(mode="json")
-        return run_langgraph_agent(
-            state.source_path,
-            settings,
-            state.request,
-            plan=state.plan,
-            registry=registry,
-            execution_id=state.execution_id,
-            existing_state=state,
-        )
+        with store.lock(f"agent_{state.run_id}"):
+            return run_langgraph_agent(
+                state.source_path,
+                settings,
+                state.request,
+                plan=state.plan,
+                registry=registry,
+                execution_id=state.execution_id,
+                existing_state=state,
+            )
     if approve:
         if state.status != AgentRunStatus.WAITING_CONFIRMATION:
             raise ValueError("Agent session is not waiting for confirmation")

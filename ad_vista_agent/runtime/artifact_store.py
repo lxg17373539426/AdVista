@@ -11,6 +11,8 @@ import fcntl
 
 from pydantic import BaseModel
 
+from .fingerprint import sha256_file
+
 
 class ArtifactStore:
     def __init__(self, output_root: Path) -> None:
@@ -79,3 +81,36 @@ class ArtifactStore:
                 payload = value.model_dump(mode="json") if isinstance(value, BaseModel) else value
                 handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
         temporary.replace(path)
+
+    def publish_directory(self, staging: Path, target: Path) -> None:
+        """Publish a completed stage directory without exposing its partial contents."""
+        staging = staging.resolve()
+        target = target.resolve()
+        if not staging.is_dir():
+            raise FileNotFoundError(staging)
+        if staging == target or target in staging.parents:
+            raise ValueError("Invalid stage publish paths")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        backup = target.with_name(f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.bak")
+        if target.exists():
+            target.replace(backup)
+        try:
+            staging.replace(target)
+        except BaseException:
+            if backup.exists() and not target.exists():
+                backup.replace(target)
+            raise
+        if backup.exists():
+            import shutil
+
+            shutil.rmtree(backup)
+
+    @staticmethod
+    def validate_file_hashes(hashes: object) -> bool:
+        if not isinstance(hashes, dict):
+            return False
+        for raw_path, raw_hash in hashes.items():
+            path = Path(str(raw_path))
+            if not path.is_file() or str(raw_hash) != sha256_file(path):
+                return False
+        return True

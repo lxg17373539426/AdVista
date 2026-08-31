@@ -123,7 +123,7 @@ def compile_decision(decision: PlannerDecision, request: AgentRequest) -> Analys
 
 def rule_plan(request: AgentRequest) -> AnalysisPlan:
     goal = request.goal.casefold()
-    requested = [item for item in request.deliverables if item in ALLOWED_DELIVERABLES][:1]
+    requested = [item for item in request.deliverables if item in ALLOWED_DELIVERABLES]
     if requested:
         deliverables = requested
     elif any(term in goal for term in ("证据", "字幕", "语音", "ocr", "asr", "evidence")) and not any(

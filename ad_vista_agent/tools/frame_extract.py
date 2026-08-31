@@ -9,6 +9,7 @@ from typing import Any
 from ad_vista_agent.runtime.fingerprint import sha256_file
 
 from .base import Tool, ToolContext
+from ad_vista_agent.runtime.process import ProcessCancelled, run_process
 
 
 @dataclass(frozen=True)
@@ -64,7 +65,7 @@ class FrameExtractTool(Tool):
             "-y",
             str(output_path),
         ]
-        self._execute(command, "FFmpeg frame extraction")
+        self._execute(command, "FFmpeg frame extraction", context.cancel_event)
         if not output_path.is_file() or output_path.stat().st_size == 0:
             raise RuntimeError(f"FFmpeg did not create a valid frame: {output_path}")
         width, height = self._image_dimensions(output_path)
@@ -88,26 +89,31 @@ class FrameExtractTool(Tool):
             "json",
             str(image_path),
         ]
-        result = self._execute(command, "FFprobe image validation")
+        result = self._execute(command, "FFprobe image validation", None)
         try:
             stream = json.loads(result.stdout)["streams"][0]
             return int(stream["width"]), int(stream["height"])
         except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"Unable to read extracted frame dimensions: {image_path}") from exc
 
-    def _execute(self, command: list[str], label: str) -> subprocess.CompletedProcess[str]:
+    def _execute(
+        self,
+        command: list[str],
+        label: str,
+        cancel_event: Any = None,
+    ) -> subprocess.CompletedProcess[str]:
         try:
-            result = subprocess.run(
+            result = run_process(
                 command,
-                capture_output=True,
-                text=True,
                 timeout=self.timeout_seconds,
-                check=False,
+                cancel_event=cancel_event,
             )
         except FileNotFoundError as exc:
             raise RuntimeError(f"Executable not found for {label}: {command[0]}") from exc
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"{label} timed out after {self.timeout_seconds}s") from exc
+        except ProcessCancelled as exc:
+            raise RuntimeError(f"{label} was cancelled") from exc
         if result.returncode != 0:
             raise RuntimeError(f"{label} failed: {result.stderr.strip() or 'unknown error'}")
         return result

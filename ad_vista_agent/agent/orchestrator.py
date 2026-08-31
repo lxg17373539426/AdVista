@@ -220,35 +220,39 @@ def run_pipeline(
     run_id = str(ingestion["run_id"])
     run_dir = Path(str(ingestion["run_dir"]))
     store = ArtifactStore(settings.paths.output_root)
-    path = _state_path(run_dir)
-    if path.is_file():
-        state = PipelineState.model_validate(store.read_json(path))
-        if state.source_path.resolve() != source:
-            raise ValueError("Pipeline source path does not match persisted state")
-    else:
-        state = _new_state(run_id, source, config_path.expanduser().resolve())
+    with store.lock(f"pipeline_{run_id}"):
+        path = _state_path(run_dir)
+        if path.is_file():
+            state = PipelineState.model_validate(store.read_json(path))
+            if state.source_path.resolve() != source:
+                raise ValueError("Pipeline source path does not match persisted state")
+        else:
+            state = _new_state(run_id, source, config_path.expanduser().resolve())
 
-    explicit_indices = [PIPELINE_STAGE_NAMES.index(name) for name in requested]
-    if not explicit_indices and state.status in {
-        PipelineStatus.COMPLETED,
-        PipelineStatus.WAITING_CONFIRMATION,
-    }:
-        return _result(state, run_dir)
+        explicit_indices = [PIPELINE_STAGE_NAMES.index(name) for name in requested]
+        if from_stage is not None:
+            start_index = PIPELINE_STAGE_NAMES.index(from_stage)
+            force.update(PIPELINE_STAGE_NAMES[start_index:])
+        if not explicit_indices and state.status in {
+            PipelineStatus.COMPLETED,
+            PipelineStatus.WAITING_CONFIRMATION,
+        }:
+            return _result(state, run_dir)
 
-    ingest_state = state.stages[0]
-    ingest_state.status = StepStatus.COMPLETED
-    ingest_state.attempts += 1
-    ingest_state.cache_hit = bool(ingestion.get("cache_hit", False))
-    ingest_state.started_at = ingest_state.started_at or _now()
-    ingest_state.completed_at = _now()
-    ingest_state.duration_seconds = 0.0
+        ingest_state = state.stages[0]
+        ingest_state.status = StepStatus.COMPLETED
+        ingest_state.attempts += 1
+        ingest_state.cache_hit = bool(ingestion.get("cache_hit", False))
+        ingest_state.started_at = ingest_state.started_at or _now()
+        ingest_state.completed_at = _now()
+        ingest_state.duration_seconds = 0.0
 
-    if explicit_indices:
-        _reset_from(state, min(explicit_indices))
-        if min(explicit_indices) > 0:
-            ingest_state.status = StepStatus.COMPLETED
-    _write_state(store, run_dir, state)
-    return _execute(state, run_dir, settings, force_stages=force, stage_runners=runners)
+        if explicit_indices:
+            _reset_from(state, min(explicit_indices))
+            if min(explicit_indices) > 0:
+                ingest_state.status = StepStatus.COMPLETED
+        _write_state(store, run_dir, state)
+        return _execute(state, run_dir, settings, force_stages=force, stage_runners=runners)
 
 
 def resume_pipeline(
@@ -265,24 +269,25 @@ def resume_pipeline(
     force = set(force_stages or set())
     _validate_stage_names(force)
 
-    if approve_review:
-        if state.status != PipelineStatus.WAITING_CONFIRMATION or state.audit_status != "review":
-            raise ValueError("Review approval is only valid for a waiting review pipeline")
-        state.review_approved = True
-        state.status = PipelineStatus.COMPLETED
-        state.current_stage = None
-        state.error = None
-        _write_state(store, run_dir, state)
-        return _result(state, run_dir)
+    with store.lock(f"pipeline_{run_id}"):
+        if approve_review:
+            if state.status != PipelineStatus.WAITING_CONFIRMATION or state.audit_status != "review":
+                raise ValueError("Review approval is only valid for a waiting review pipeline")
+            state.review_approved = True
+            state.status = PipelineStatus.COMPLETED
+            state.current_stage = None
+            state.error = None
+            _write_state(store, run_dir, state)
+            return _result(state, run_dir)
 
-    if state.status == PipelineStatus.WAITING_CONFIRMATION:
-        return _result(state, run_dir)
-    if state.status == PipelineStatus.COMPLETED and not force:
-        return _result(state, run_dir)
-    if force:
-        _reset_from(state, min(PIPELINE_STAGE_NAMES.index(name) for name in force))
-    elif state.status == PipelineStatus.FAILED:
-        failed = next((index for index, stage in enumerate(state.stages) if stage.status == StepStatus.FAILED), None)
-        if failed is not None:
-            _reset_from(state, failed)
-    return _execute(state, run_dir, settings, force_stages=force, stage_runners=runners)
+        if state.status == PipelineStatus.WAITING_CONFIRMATION:
+            return _result(state, run_dir)
+        if state.status == PipelineStatus.COMPLETED and not force:
+            return _result(state, run_dir)
+        if force:
+            _reset_from(state, min(PIPELINE_STAGE_NAMES.index(name) for name in force))
+        elif state.status == PipelineStatus.FAILED:
+            failed = next((index for index, stage in enumerate(state.stages) if stage.status == StepStatus.FAILED), None)
+            if failed is not None:
+                _reset_from(state, failed)
+        return _execute(state, run_dir, settings, force_stages=force, stage_runners=runners)

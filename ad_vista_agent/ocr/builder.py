@@ -22,7 +22,7 @@ from ad_vista_agent.schemas import (
 from ad_vista_agent.timeline.builder import build_timeline
 from ad_vista_agent.tools import OcrWorkerResult, OcrWorkerTool, ToolContext
 
-from .parse import parse_deepseek_grounding
+from .parse import ocr_quality_flags, parse_deepseek_grounding
 
 
 DEEPSEEK_VERSIONS = {
@@ -317,6 +317,7 @@ def build_ocr(video_path: Path, settings: Settings, *, force: bool = False) -> d
                         "keyframe_id": frame.keyframe_id,
                         "shot_id": frame.shot_id,
                         "label": region.label,
+                        "quality_flags": ocr_quality_flags(region.text),
                         "backend_versions": (
                             DEEPSEEK_VERSIONS
                             if frame.backend == "deepseek_ocr"

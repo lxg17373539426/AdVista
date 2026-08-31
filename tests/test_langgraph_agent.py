@@ -30,8 +30,10 @@ def test_langgraph_react_executes_required_tools_in_order(monkeypatch) -> None:
         settings = load_settings().model_copy(
             update={"paths": load_settings().paths.model_copy(update={"output_root": root / "outputs"})}
         )
-        request = AgentRequest(goal="只登记视频", deliverables=["evidence"])
-        plan = rule_plan(request).model_copy(update={"steps": rule_plan(request).steps[:1]})
+        request = AgentRequest(goal="只登记视频")
+        plan = rule_plan(request).model_copy(
+            update={"steps": rule_plan(request).steps[:1], "deliverables": [], "response_mode": "answer"}
+        )
         run_dir = root / "outputs" / "runs" / "ingest_test"
         run_dir.mkdir(parents=True)
         monkeypatch.setattr(

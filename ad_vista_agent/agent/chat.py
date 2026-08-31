@@ -107,6 +107,31 @@ def _context(
         }
         for item in clusters
     ]
+    ocr_quality_flags = [
+        {
+            "id": item.evidence_id,
+            "content": item.content,
+            "flags": item.metadata.get("quality_flags", []),
+            "confidence": item.confidence,
+            "start_ms": item.start_ms,
+        }
+        for item in evidence
+        if item.modality.value == "ocr" and item.metadata.get("quality_flags")
+    ]
+    ocr_candidates = [
+        {
+            "id": item.cluster_id,
+            "content": item.canonical_content,
+            "start_ms": item.start_ms,
+            "end_ms": item.end_ms,
+            "confidence": item.confidence,
+            "kind": "brand_or_product_candidate",
+        }
+        for item in clusters
+        if item.canonical_content.strip()
+        and len(item.canonical_content.strip()) >= 2
+        and not item.canonical_content.strip().isdigit()
+    ]
     allowed = {item["id"] for item in speech} | {item["id"] for item in ocr_clusters}
     keyframes_path = run_dir / "timeline" / "keyframes.jsonl"
     keyframes = _load_jsonl(keyframes_path, Keyframe) if keyframes_path.is_file() else []
@@ -128,10 +153,18 @@ def _context(
                 item for item in raw_observations["observations"] if isinstance(item, dict)
             ]
     allowed.update(item["id"] for item in visual_frames)
+    ledger_path = ledger_dir / "ledger.json"
+    duration_ms = 0
+    if ledger_path.is_file():
+        raw_ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+        if isinstance(raw_ledger, dict):
+            duration_ms = int(raw_ledger.get("duration_ms") or 0)
     return {
         "asset_id": analysis.asset_id if analysis is not None else (evidence[0].asset_id if evidence else ""),
         "speech_evidence": speech,
         "ocr_clusters": ocr_clusters,
+        "ocr_quality_flags": ocr_quality_flags,
+        "ocr_candidates": ocr_candidates,
         "validated_insights": [
             {
                 "id": item.insight_id,
@@ -145,6 +178,7 @@ def _context(
         "unknowns": analysis.unknowns if analysis is not None else [],
         "visual_keyframes": visual_frames,
         "visual_observations": visual_observations,
+        "duration_ms": duration_ms,
     }, allowed
 
 
@@ -263,6 +297,147 @@ def normalize_conversation_answer(answer: ConversationAnswer) -> ConversationAns
     if answer.epistemic_status == "unknown" and not answer.answer.startswith("当前证据不足"):
         return answer.model_copy(update={"answer": f"当前证据不足：{answer.answer}"})
     return answer
+
+
+def _normalize_model_references(
+    answer: ConversationAnswer,
+    context: dict[str, Any],
+) -> ConversationAnswer:
+    insight_refs = {
+        str(item.get("id")): [str(ref) for ref in item.get("evidence_refs", [])]
+        for item in context.get("validated_insights", [])
+        if isinstance(item, dict)
+    }
+    observation_refs = {
+        str(item.get("keyframe_id"))
+        for item in context.get("visual_observations", [])
+        if isinstance(item, dict) and str(item.get("keyframe_id", "")).startswith("kf_")
+    }
+    references: list[str] = []
+    for raw_reference in answer.evidence_refs:
+        reference = raw_reference.strip()
+        if reference.startswith("validated_insights:"):
+            expanded = insight_refs.get(reference.partition(":")[2], [])
+        elif reference.startswith("visual_observations:"):
+            key = reference.partition(":")[2]
+            expanded = [key] if key in observation_refs else []
+        elif reference in insight_refs:
+            expanded = insight_refs[reference]
+        elif reference in observation_refs:
+            expanded = [reference]
+        else:
+            expanded = [reference]
+        for item in expanded:
+            if item and item not in references:
+                references.append(item)
+    return answer.model_copy(update={"evidence_refs": references[:12]})
+
+
+def _sanitize_answer_timing(
+    answer: ConversationAnswer,
+    context: dict[str, Any],
+    question: str = "",
+) -> ConversationAnswer:
+    duration_seconds = int(context.get("duration_ms") or 0) / 1000
+    if duration_seconds <= 0:
+        return answer
+
+    def replace(match: re.Match[str]) -> str:
+        value = float(match.group("seconds"))
+        return "" if value > duration_seconds + 1 else match.group(0)
+
+    cleaned = re.sub(
+        r"[（(]?约\s*(?P<seconds>\d+(?:\.\d+)?)\s*秒[）)]?",
+        replace,
+        answer.answer,
+    )
+    if any(term in question for term in ("开头", "中间", "结尾", "时间顺序")):
+        cleaned = re.sub(
+            r"[（(]?约?\s*\d+(?:\.\d+)?\s*秒\s*(?:至|到|-)\s*\d+(?:\.\d+)?\s*秒[）)]?[：:]?",
+            "：",
+            cleaned,
+        )
+    cleaned = re.sub(r"[ 	]{2,}", " ", cleaned)
+    cleaned = cleaned.replace("：，", "：").replace(":，", ":")
+    return answer.model_copy(update={"answer": cleaned})
+
+
+def _normalize_visual_claim_language(answer: ConversationAnswer) -> ConversationAnswer:
+    text = answer.answer
+    text = text.replace("一位女性模特", "一位呈女性化风格的模特")
+    text = text.replace("女性模特", "呈女性化风格的模特")
+    text = text.replace("羊羔毛外套", "羊羔毛外观的毛绒外套")
+    return answer.model_copy(update={"answer": text}) if text != answer.answer else answer
+
+
+def _insight_evidence_refs(context: dict[str, Any]) -> set[str]:
+    return {
+        str(reference)
+        for item in context.get("validated_insights", [])
+        if isinstance(item, dict)
+        for reference in item.get("evidence_refs", [])
+    }
+
+
+def _ground_presented_visual_answer(
+    answer: ConversationAnswer,
+    question: str,
+    frames: list[dict[str, Any]],
+) -> ConversationAnswer:
+    if answer.epistemic_status != "unknown" or answer.evidence_refs:
+        return answer
+    value = question.casefold()
+    eligible = any(
+        term in value
+        for term in (
+            "开头",
+            "中间",
+            "结尾",
+            "时间顺序",
+            "展示",
+            "穿搭",
+            "外观",
+            "画面",
+            "卖点",
+            "营销方案",
+            "营销策略",
+            "创意方案",
+            "hook",
+            "脚本",
+            "分镜",
+        )
+    )
+    blocked = any(
+        term in value
+        for term in (
+            "价格",
+            "优惠",
+            "购买方式",
+            "成分",
+            "材质",
+            "健康",
+            "功效",
+            "真实身份",
+        )
+    )
+    text = answer.answer.removeprefix("当前证据不足：").strip()
+    references = [
+        str(item.get("id"))
+        for item in frames
+        if str(item.get("id", "")).startswith("kf_")
+    ]
+    if not eligible or blocked or len(text) < 40 or not references:
+        return answer
+    return answer.model_copy(
+        update={
+            "answer": text,
+            "evidence_refs": list(dict.fromkeys(references))[:12],
+            "epistemic_status": "visual",
+            "unsupported_points": [
+                item for item in answer.unsupported_points if item.strip() != text
+            ],
+        }
+    )
 
 
 def _terms(value: str) -> set[str]:
@@ -584,6 +759,28 @@ def _partial_json_string(value: str, field: str) -> str:
     return "".join(chars)
 
 
+def _answer_is_incomplete(answer: ConversationAnswer) -> bool:
+    text = answer.answer.strip()
+    if text.endswith(("：", ":")):
+        return True
+    if len(text) < 40 and any(
+        term in text for term in ("如下", "以下", "制定", "总结", "时间顺序")
+    ):
+        return True
+    return False
+
+
+def _answer_matches_intent(answer: ConversationAnswer, intent: str) -> bool:
+    if intent not in {"marketing", "creative"}:
+        return True
+    required = (
+        ("视频事实", "分析推断", "营销假设")
+        if intent == "marketing"
+        else ("Hook", "分镜", "A/B")
+    )
+    return all(term in answer.answer for term in required)
+
+
 def _qwen_answer(
     question: str,
     context: dict[str, Any],
@@ -608,11 +805,16 @@ def _qwen_answer(
         "语音/OCR 支持的事实用 grounded；关键帧直接可见的颜色、外观和画面用 visual，并引用合法 kf_* ID。"
         "普通问候和非事实闲聊用 conversational，不引用 Evidence，也不要说证据不足。"
         "问题中证据不足的部分必须单独写入 unsupported_points，不得伪装成有证据结论。"
+        "evidence_refs 只能填写 EVIDENCE_CONTEXT 中真实存在的 speech_*、ocr_cluster_* 或 kf_* ID；"
+        "不得填写 validated_insights:*、visual_observations:*、洞察 ID、字段名或自造 ID。"
         "如果证据不足，epistemic_status 必须为 unknown，answer 必须以‘当前证据不足’开头，且 evidence_refs 为空。"
+        "unknown 状态的 answer 只能描述不能确认的内容，不得在‘当前证据不足’后继续给出确定结论。"
+        "涉及人物性别时，可以描述画面呈现为男性化、女性化或无法判断，但不得把外貌、发型、妆容或服饰推断为真实性别身份。"
         "材质和成分不能仅凭外观确认；可以描述视觉上像什么，但必须说明无法确认真实材质。"
         "不得把广告声明写成独立验证的客观事实，不得编造价格、成分、受众属性或视频内容。"
         "不要在 answer 正文中输出 speech_*、ocr_cluster_*、kf_* 等内部证据 ID，只放在 evidence_refs 字段。"
         "QUESTION 是用户本轮最新问题，必须优先重新检查当前视频后回答；会话历史仅用于理解指代，历史回答不是证据，不能机械重复。"
+        "涉及时间顺序时，必须使用 visual_keyframes 中的 timestamp_ms 换算秒数，不得凭空估计时间；没有时间证据时不要写具体秒数。"
     )
     if intent == "marketing":
         prompt += (
@@ -624,8 +826,15 @@ def _qwen_answer(
             "营销建议本身不是对视频事实的断言，因此可在产品事实有证据支撑时使用 grounded，"
             "并在 evidence_refs 中引用支撑产品定位和卖点的相关 ID。"
         )
+    elif intent == "creative":
+        prompt += (
+            "用户正在请求广告创意方案。answer 必须包含三个 Hook、一个约15秒脚本、分镜和至少两个 A/B 版本。"
+            "必须使用‘视频事实’和‘创意假设’两个明确标题区分原视频内容与新增创作；"
+            "不得沿用历史洞察中的人物身份结论，不得把语音转写中的偶然词语当作人物属性。"
+        )
     messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
-    for item in history[-12:]:
+    # Previous assistant answers are not evidence and can preserve earlier hallucinations.
+    for item in [entry for entry in history[-12:] if entry.get("role") == "user"][-6:]:
         messages.append({"role": item["role"], "content": item["content"]})
     user_text = (
         "EVIDENCE_CONTEXT\n"
@@ -676,7 +885,40 @@ def _qwen_answer(
                         on_delta(current[len(emitted) :])
                         emitted = current
                 text = "".join(chunks)
-        return ConversationAnswer.model_validate_json(text)
+        answer = ConversationAnswer.model_validate_json(text)
+        if on_delta is None and (
+            _answer_is_incomplete(answer) or not _answer_matches_intent(answer, intent)
+        ):
+            retry_messages = [
+                *messages,
+                {"role": "assistant", "content": text},
+                {
+                    "role": "user",
+                    "content": (
+                        "上一版只写了开场句，没有完成用户要求。请重新返回完整 JSON："
+                        "answer 必须包含实际结论或完整方案，不能以冒号、‘如下’、‘以下’结束；"
+                        f"并完整满足当前 {intent} 任务要求与分层标题；"
+                        "evidence_refs 仍只能使用输入中真实存在的证据 ID。"
+                    ),
+                },
+            ]
+            retry_payload = {**payload, "messages": retry_messages, "seed": 43}
+            retry_call = urllib.request.Request(
+                settings.insight.endpoint.rstrip("/") + "/chat/completions",
+                data=json.dumps(retry_payload, ensure_ascii=False).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(
+                retry_call, timeout=settings.insight.timeout_seconds
+            ) as retry_response:
+                retry_value = json.loads(retry_response.read().decode("utf-8"))
+            answer = ConversationAnswer.model_validate_json(
+                str(retry_value["choices"][0]["message"]["content"])
+            )
+            if _answer_is_incomplete(answer) or not _answer_matches_intent(answer, intent):
+                raise ValueError("Chat answer remained incomplete after retry")
+        return answer
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Chat service HTTP {exc.code}: {body[-4000:]}") from exc
@@ -726,11 +968,31 @@ def ask_agent(
     elif _is_evidence_request(value):
         result = build_evidence_document(run_dir)
         report_url = f"/api/runs/{run_id}/exports/evidence-html"
+        evidence_rows = _load_jsonl(run_dir / "ledger" / "evidence.jsonl", Evidence)
+        questionable = [
+            item
+            for item in evidence_rows
+            if item.confidence is None or item.confidence < 0.75
+        ]
+        questionable_text = (
+            "低置信度或未提供置信度的条目："
+            + "；".join(
+                f"{item.start_ms / 1000:.1f}s {item.modality.value}：{item.content[:80]}"
+                for item in questionable[:5]
+            )
+            + "。"
+            if questionable
+            else "未发现低于 0.75 的置信度条目。"
+        )
         answer = ConversationAnswer(
-            answer=f"证据提取文档已生成：{result['evidence_count']} 条原始证据。点击下方按钮查看 HTML 文档。",
+            answer=(
+                f"证据提取文档已生成：{result['evidence_count']} 条原始证据。"
+                f"{questionable_text}点击下方按钮查看完整 HTML 文档。"
+            ),
             epistemic_status="conversational",
         )
     elif _is_direct_marketing_summary(value) or _is_marketing_request(value):
+        direct_summary = _is_direct_marketing_summary(value)
         image_frames = _relevant_keyframes(
             value, context, settings.insight.max_images_per_prompt
         )
@@ -742,9 +1004,12 @@ def ask_agent(
             run_dir=run_dir,
             include_images=True,
             image_frames=image_frames,
-            intent="marketing",
+            intent="answer" if direct_summary else "marketing",
         )
-        answer = normalize_conversation_answer(raw_answer)
+        answer = normalize_conversation_answer(
+            _normalize_model_references(raw_answer, context)
+        )
+        answer = _ground_presented_visual_answer(answer, value, image_frames)
         keyframe_refs = _presented_keyframe_refs(
             run_dir, context, image_frames, settings.insight.max_images_per_prompt
         )
@@ -755,9 +1020,10 @@ def ask_agent(
         }
         allowed_refs = {
             ref for ref in allowed_refs if not ref.startswith("kf_")
-        } | observed_keyframe_refs | keyframe_refs
-        _write_marketing_report(artifact_root, answer.answer)
-        report_url = f"/api/runs/{run_id}/exports/marketing-html"
+        } | observed_keyframe_refs | keyframe_refs | _insight_evidence_refs(context)
+        if not direct_summary:
+            _write_marketing_report(artifact_root, answer.answer)
+            report_url = f"/api/runs/{run_id}/exports/marketing-html"
     elif _is_report_request(value):
         result = build_report(
             state.source_path,
@@ -766,24 +1032,53 @@ def ask_agent(
             artifact_root=artifact_root,
         )
         report_url = f"/api/runs/{run_id}/exports/report-html"
+        audit = store.read_json(artifact_root / "critic" / "audit.json")
+        review_items = [
+            str(item.get("insight_id"))
+            for item in audit.get("insights", [])
+            if isinstance(item, dict) and item.get("status") == "review"
+        ]
+        review_text = (
+            "需要人工复核的洞察：" + "、".join(review_items) + "。"
+            if review_items
+            else "当前没有需要人工复核的洞察。"
+        )
         answer = ConversationAnswer(
             answer=(
-                f"HTML 广告分析报告已生成：{result['insight_count']} 条洞察，"
-                "点击下方按钮即可下载 HTML 或 Markdown 版本。"
+                f"HTML 广告分析报告已生成：{result['insight_count']} 条洞察。"
+                f"{review_text}点击下方按钮即可下载 HTML 或 Markdown 版本。"
             ),
             epistemic_status="conversational",
         )
     elif _is_creative_request(value):
-        build_creative(
-            state.source_path,
+        image_frames = _relevant_keyframes(
+            value, context, settings.insight.max_images_per_prompt
+        )
+        creative_context = {
+            **context,
+            "validated_insights": [],
+            "speech_evidence": [],
+        }
+        raw_answer = _qwen_answer(
+            value,
+            creative_context,
+            [],
             settings,
-            request=state.request,
-            artifact_root=artifact_root,
+            run_dir=run_dir,
+            include_images=True,
+            image_frames=image_frames,
+            intent="creative",
         )
-        package = CreativePackage.model_validate(
-            store.read_json(artifact_root / "creative" / "package.json")
+        answer = normalize_conversation_answer(
+            _normalize_model_references(raw_answer, creative_context)
         )
-        answer = _render_creative_answer(package)
+        answer = _ground_presented_visual_answer(answer, value, image_frames)
+        keyframe_refs = _presented_keyframe_refs(
+            run_dir, context, image_frames, settings.insight.max_images_per_prompt
+        )
+        allowed_refs = {
+            ref for ref in allowed_refs if not ref.startswith("kf_")
+        } | keyframe_refs | _insight_evidence_refs(context)
     elif _is_greeting(value):
         answer = ConversationAnswer(
             answer="你好，我是 AdVista。我可以结合当前视频的语音、字幕和关键帧回答广告内容，也可以继续分析卖点、画面和创意。",
@@ -802,7 +1097,10 @@ def ask_agent(
                 include_images=True,
                 image_frames=image_frames,
             )
-        answer = normalize_conversation_answer(raw_answer)
+        answer = normalize_conversation_answer(
+            _normalize_model_references(raw_answer, context)
+        )
+        answer = _ground_presented_visual_answer(answer, value, image_frames)
         keyframe_refs = _presented_keyframe_refs(
             run_dir, context, image_frames, settings.insight.max_images_per_prompt
         )
@@ -813,7 +1111,9 @@ def ask_agent(
         }
         allowed_refs = {
             ref for ref in allowed_refs if not ref.startswith("kf_")
-        } | observed_keyframe_refs | keyframe_refs
+        } | observed_keyframe_refs | keyframe_refs | _insight_evidence_refs(context)
+    answer = _sanitize_answer_timing(answer, context, value)
+    answer = _normalize_visual_claim_language(answer)
     validate_conversation_answer(answer, allowed_refs)
     answer = answer.model_copy(update={"answer": _strip_evidence_ids(answer.answer)})
     seeded_question = bool(

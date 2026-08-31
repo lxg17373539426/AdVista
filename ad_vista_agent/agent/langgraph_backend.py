@@ -5,9 +5,17 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, TypedDict, cast
 
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    HumanMessage,
+    ToolMessage,
+    SystemMessage,
+    messages_from_dict,
+    messages_to_dict,
+)
 from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
@@ -28,7 +36,7 @@ from ad_vista_agent.schemas import (
 )
 from ad_vista_agent.tools import ToolContext, ToolRegistry
 
-from .planner import CANONICAL_TOOL_ORDER, TOOL_DEPENDENCIES, rule_plan
+from .planner import CANONICAL_TOOL_ORDER, TOOL_DEPENDENCIES, rule_plan, validate_plan
 
 
 class ReActState(TypedDict, total=False):
@@ -39,6 +47,54 @@ class ReActState(TypedDict, total=False):
     status: str
     error: str | None
     final_answer: str
+
+
+def _graph_state_path(state_dir: Path) -> Path:
+    return state_dir / "graph_state.json"
+
+
+def _serialize_graph_state(state: ReActState) -> dict[str, Any]:
+    return {
+        "messages": messages_to_dict(state.get("messages", [])),
+        "completed_tools": list(state.get("completed_tools", [])),
+        "observations": list(state.get("observations", [])),
+        "tool_calls": list(state.get("tool_calls", [])),
+        "status": state.get("status"),
+        "error": state.get("error"),
+        "final_answer": state.get("final_answer"),
+    }
+
+
+def _restore_graph_state(store: ArtifactStore, state_dir: Path) -> ReActState | None:
+    path = _graph_state_path(state_dir)
+    if not path.is_file():
+        return None
+    value = store.read_json(path)
+    raw_messages = value.get("messages", [])
+    if not isinstance(raw_messages, list):
+        raise ValueError("Persisted LangGraph messages must be a list")
+    return cast(ReActState, {
+        "messages": messages_from_dict(raw_messages),
+        "completed_tools": [str(item) for item in value.get("completed_tools", [])],
+        "observations": list(value.get("observations", [])),
+        "tool_calls": list(value.get("tool_calls", [])),
+        "status": value.get("status"),
+        "error": value.get("error"),
+        "final_answer": value.get("final_answer"),
+    })
+
+
+def _next_graph_state(state: ReActState, update: dict[str, Any]) -> ReActState:
+    next_state = dict(state)
+    if "messages" in update:
+        next_state["messages"] = [
+            *state.get("messages", []),
+            *cast(list[AnyMessage], update["messages"]),
+        ]
+    for key, value in update.items():
+        if key != "messages":
+            next_state[key] = value
+    return cast(ReActState, next_state)
 
 
 def _observation(output: dict[str, Any]) -> dict[str, object]:
@@ -78,7 +134,7 @@ def run_langgraph_agent(
     if not source.is_file():
         raise FileNotFoundError(source)
     store = ArtifactStore(settings.paths.output_root)
-    plan = plan or rule_plan(request)
+    plan = validate_plan(plan or rule_plan(request), registry, request)
     session = existing_state
     if session is None:
         ingestion = ingest_video(source, settings)
@@ -111,6 +167,9 @@ def run_langgraph_agent(
         session.status = AgentRunStatus.RUNNING
         session.error = None
 
+    if session.execution_id is None:
+        raise ValueError("Agent execution is missing an execution ID")
+
     required = [step.tool for step in plan.steps]
     forced = set(force_tools or set())
     unknown_forced = forced.difference(required)
@@ -122,11 +181,17 @@ def run_langgraph_agent(
         source_path=source,
         execution_dir=state_dir,
         request=request,
+        cancel_event=cancel_event,
     )
 
     def persist() -> None:
         from .core import _write
         _write(store, state_dir, run_dir, session)
+
+    def persist_graph(state: ReActState) -> None:
+        store.write_json(_graph_state_path(state_dir), _serialize_graph_state(state))
+
+    persist()
 
     def ready_tools(completed: set[str]) -> list[str]:
         return [
@@ -140,6 +205,11 @@ def run_langgraph_agent(
         def invoke() -> str:
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("Agent execution cancelled")
+            if len(session.tool_calls) >= request.max_tool_calls:
+                session.status = AgentRunStatus.FAILED
+                session.error = "Agent tool-call budget exhausted"
+                persist()
+                raise RuntimeError(session.error)
             record = ToolCallRecord(
                 call_id=f"call_{len(session.tool_calls) + 1:03d}",
                 tool=name,
@@ -193,7 +263,9 @@ def run_langgraph_agent(
         completed = set(state.get("completed_tools", []))
         available = ready_tools(completed)
         if not available:
-            return {"status": "complete"}
+            result = {"status": "complete"}
+            persist_graph(_next_graph_state(state, result))
+            return result
         system = SystemMessage(content=(
             "你是 AdVista 的 LangGraph ReAct Agent。根据用户目标选择下一步工具。"
             "只能调用当前提供的工具，不能跳过依赖，不能重复调用。"
@@ -206,7 +278,9 @@ def run_langgraph_agent(
         ).invoke(
             [system, *state.get("messages", [])]
         )
-        return {"messages": [response]}
+        result = {"messages": [response]}
+        persist_graph(_next_graph_state(state, result))
+        return result
 
     def tool_node(state: ReActState) -> dict[str, Any]:
         message = state.get("messages", [])[-1]
@@ -216,13 +290,32 @@ def run_langgraph_agent(
         messages: list[AnyMessage] = []
         for call in message.tool_calls:
             name = str(call["name"])
+            previous = next(
+                (
+                    record
+                    for record in reversed(session.tool_calls)
+                    if record.tool == name and record.status == ToolCallStatus.COMPLETED
+                ),
+                None,
+            )
+            if previous is not None and name not in forced:
+                completed.add(name)
+                messages.append(
+                    ToolMessage(
+                        content=json.dumps(previous.observation, ensure_ascii=False),
+                        tool_call_id=str(call["id"]),
+                    )
+                )
+                continue
             available = ready_tools(completed)
             if name not in available:
                 raise ValueError(f"ReAct selected unavailable or out-of-order tool: {name}")
             result = make_tool(name).invoke(call.get("args") or {})
             completed.add(name)
             messages.append(ToolMessage(content=str(result), tool_call_id=str(call["id"])))
-        return {"messages": messages, "completed_tools": sorted(completed)}
+        result = {"messages": messages, "completed_tools": sorted(completed)}
+        persist_graph(_next_graph_state(state, result))
+        return result
 
     def route(state: ReActState) -> str:
         if state.get("status") == "complete":
@@ -241,7 +334,9 @@ def run_langgraph_agent(
             if session.confirmations else AgentRunStatus.COMPLETED
         )
         persist()
-        return {"status": session.status.value}
+        result = {"status": session.status.value}
+        persist_graph(_next_graph_state(state, result))
+        return result
 
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tool_node)
@@ -252,14 +347,23 @@ def run_langgraph_agent(
     graph.add_edge("finish", END)
     compiled = graph.compile()
     completed_initial = sorted(
-        {record.tool for record in session.tool_calls if record.status == ToolCallStatus.COMPLETED}
+        {
+            record.tool
+            for record in session.tool_calls
+            if record.status == ToolCallStatus.COMPLETED and record.tool not in forced
+        }
     )
-    initial: ReActState = {
-        "messages": [HumanMessage(content="开始执行用户请求。")],
-        "completed_tools": completed_initial,
-        "observations": [],
-        "tool_calls": [],
-    }
+    initial: ReActState | None = _restore_graph_state(store, state_dir)
+    if initial is None:
+        initial = {
+            "messages": [HumanMessage(content="开始执行用户请求。")],
+            "completed_tools": completed_initial,
+            "observations": [],
+            "tool_calls": [],
+        }
+        persist_graph(initial)
+    elif initial.get("status") == "complete":
+        return session.model_dump(mode="json")
     try:
         compiled.invoke(initial, {"recursion_limit": settings.agent.recursion_limit})
     except Exception as exc:

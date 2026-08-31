@@ -25,7 +25,7 @@ from .critic import audit_analysis
 from .render import render_html_report, render_markdown_report
 
 
-REPORT_PIPELINE_VERSION = "5"
+REPORT_PIPELINE_VERSION = "6"
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
@@ -113,7 +113,12 @@ def build_report(
 
     if not force and audit_path.is_file() and metrics_path.is_file():
         metrics = store.read_json(metrics_path)
-        if metrics.get("cache_key") == cache_key:
+        hashes = metrics.get("artifact_sha256")
+        if (
+            metrics.get("cache_key") == cache_key
+            and isinstance(hashes, dict)
+            and hashes.get("audit") == sha256_file(audit_path)
+        ):
             audit = CriticAudit.model_validate(store.read_json(audit_path))
             _validate_cached_deliverables(metrics, markdown_path, html_path)
             return {
@@ -188,6 +193,7 @@ def build_report(
             "markdown": sha256_file(markdown_path),
             "html": sha256_file(html_path),
         },
+        "artifact_sha256": {"audit": sha256_file(audit_path)},
         "total_seconds": round(total_seconds, 6),
     }
     store.write_json(metrics_path, metrics)

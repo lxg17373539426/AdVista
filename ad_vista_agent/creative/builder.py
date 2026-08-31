@@ -25,7 +25,7 @@ from ad_vista_agent.schemas import (
 from ad_vista_agent.tools import QwenInsightTool, ToolContext
 
 
-CREATIVE_PIPELINE_VERSION = "1"
+CREATIVE_PIPELINE_VERSION = "2"
 QWEN_VERSIONS = {"vllm": "0.19.1", "torch": "2.10.0", "transformers": "5.13.0"}
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -86,9 +86,16 @@ def _load_context(
     allowed = {item.evidence_id for item in evidence if item.modality.value == "speech"} | {
         item.cluster_id for item in clusters
     }
+    validated_insights = []
+    for item in analysis.insights:
+        valid_refs = [ref for ref in item.evidence_refs if ref in allowed]
+        if valid_refs:
+            validated_insights.append(
+                item.model_copy(update={"evidence_refs": valid_refs}).model_dump(mode="json")
+            )
     return {
         "ledger": build_ledger_payload(ledger, evidence, clusters, relations),
-        "validated_insights": analysis.model_dump(mode="json"),
+        "validated_insights": validated_insights,
         "unknowns": analysis.unknowns,
     }, allowed, paths
 
@@ -122,7 +129,21 @@ def build_creative(
     cache_key = stage_cache_key(cache_payload)
     if not force and package_path.is_file() and metrics_path.is_file():
         metrics = store.read_json(metrics_path)
-        if metrics.get("cache_key") == cache_key:
+        artifact_hashes = metrics.get("artifact_sha256")
+        if (
+            metrics.get("cache_key") == cache_key
+            and isinstance(artifact_hashes, dict)
+            and all(
+                artifact_hashes.get(name) == sha256_file(output_dir / filename)
+                for name, filename in {
+                    "package": "package.json",
+                    "hooks": "hooks.json",
+                    "script": "script.json",
+                    "storyboard": "storyboard.json",
+                    "ab_plan": "ab_plan.json",
+                }.items()
+            )
+        ):
             package = CreativePackage.model_validate(store.read_json(package_path))
             _validate_grounding(package, allowed_refs)
             return {
@@ -138,7 +159,9 @@ def build_creative(
         "你是证据约束的广告创作 Agent。只能根据输入 Ledger 和已验证洞察创作。"
         "生成中文 Hook、短视频脚本、结构化分镜和至少两个 A/B 版本。"
         "每个创作项目必须在 evidence_refs 引用输入中存在的 speech Evidence ID 或 ocr_cluster ID。"
+        "不要引用 insight_id、validated_insights 字段名、visual_observations 字段名或其他内部对象名。"
         "广告声明只能写成广告声称，不得升级为独立验证事实；证据无法确认的内容写入 unsupported_points。"
+        "将原视频事实、营销推断和创意假设明确分开；创意假设可以生成，但必须在文本中标注为建议或假设。"
         "visual_direction 和 shot_description 是建议，不得声称原视频已经展示未被证据支持的画面。"
         "不要编造价格、成分、功效、受众属性或画面内容；每个字符串必须完整结束，不得截断。只返回符合 Schema 的 JSON。"
         "当前 TASK 的 goal 决定创作重点，mode=deep 时应提供更完整的镜头与 A/B 推演，但不得超出证据。"
@@ -205,6 +228,13 @@ def build_creative(
             "creative_depth": "deep" if context["task"].get("mode") == "deep" else "standard",
         },
         "total_seconds": round(time.perf_counter() - started, 6),
+        "artifact_sha256": {
+            "package": sha256_file(package_path),
+            "hooks": sha256_file(output_dir / "hooks.json"),
+            "script": sha256_file(output_dir / "script.json"),
+            "storyboard": sha256_file(output_dir / "storyboard.json"),
+            "ab_plan": sha256_file(output_dir / "ab_plan.json"),
+        },
     }
     store.write_json(metrics_path, metrics)
     manifest_path = output_root / "manifest.json"

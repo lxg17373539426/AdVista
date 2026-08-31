@@ -14,6 +14,7 @@ from ad_vista_agent.speech.builder import build_speech
 from ad_vista_agent.timeline.builder import build_timeline
 from ad_vista_agent.schemas import AgentRequest
 from ad_vista_agent.tools import Tool, ToolContext, ToolRegistry
+from ad_vista_agent.tools.base import reset_active_cancel_event, set_active_cancel_event
 
 
 Builder = Callable[[Path, Settings, bool, AgentRequest | None, Path | None], dict[str, Any]]
@@ -48,13 +49,17 @@ class StageTool(Tool):
         artifact_root = (
             context.execution_dir / "artifacts" if context.execution_dir is not None else None
         )
-        result = self.builder(
-            context.source_path,
-            self.settings,
-            bool(arguments.get("force", False)),
-            context.request,
-            artifact_root,
-        )
+        token = set_active_cancel_event(context.cancel_event)
+        try:
+            result = self.builder(
+                context.source_path,
+                self.settings,
+                bool(arguments.get("force", False)),
+                context.request,
+                artifact_root,
+            )
+        finally:
+            reset_active_cancel_event(token)
         if result.get("status") != "ok":
             raise RuntimeError(f"Tool {self.name} returned non-ok status")
         return result
