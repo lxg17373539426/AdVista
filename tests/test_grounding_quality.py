@@ -4,7 +4,7 @@ from ad_vista_agent.insights.grounding import validate_analysis_grounding
 from ad_vista_agent.schemas import MarketingAnalysis
 
 
-def _analysis(claim: str) -> MarketingAnalysis:
+def _analysis(claim: str, evidence_ref: str = "ocr_cluster_0001") -> MarketingAnalysis:
     return MarketingAnalysis.model_validate(
         {
             "asset_id": "asset_test",
@@ -16,7 +16,7 @@ def _analysis(claim: str) -> MarketingAnalysis:
                     "insight_id": "insight_001",
                     "dimension": "selling_point",
                     "claim": claim,
-                    "evidence_refs": ["ocr_cluster_0001"],
+                    "evidence_refs": [evidence_ref],
                     "confidence": 0.7,
                     "epistemic_status": "observed",
                     "reasoning_summary": "依据画面文字。",
@@ -45,4 +45,14 @@ def test_grounding_accepts_claim_with_source_overlap() -> None:
         allowed_references={"ocr_cluster_0001"},
         max_per_dimension=5,
         reference_content={"ocr_cluster_0001": "Nenuco"},
+    )
+
+
+def test_grounding_accepts_translated_claim_with_speech_source() -> None:
+    validate_analysis_grounding(
+        _analysis("视频介绍一款可以互动和照料的娃娃", evidence_ref="speech_0001"),
+        asset_id="asset_test",
+        allowed_references={"speech_0001"},
+        max_per_dimension=5,
+        reference_content={"speech_0001": "Papusa interactiva pe care o poti hrani"},
     )

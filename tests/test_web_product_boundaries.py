@@ -152,6 +152,21 @@ def test_visual_observations_are_persisted_for_video_chat() -> None:
     assert "observed_keyframe_refs" in chat
 
 
+def test_timeline_keyframes_anchor_shot_starts_for_temporal_questions() -> None:
+    builder = (STATIC.parents[1] / "timeline" / "builder.py").read_text(encoding="utf-8")
+
+    assert '"keyframe_strategy": "shot_start_v2"' in builder
+    assert "timestamp_ms = shot.start_ms" in builder
+    assert 'selection_reason="shot_start"' in builder
+
+
+def test_chat_does_not_treat_keyframe_sample_time_as_video_start() -> None:
+    chat = (STATIC.parents[1] / "agent" / "chat.py").read_text(encoding="utf-8")
+
+    assert "关键帧 timestamp_ms 是该图片的采样时间" in chat
+    assert "不能据此推断此前没有画面" in chat
+
+
 def test_relevant_keyframes_use_visual_text_and_temporal_fallback() -> None:
     from ad_vista_agent.agent.chat import _relevant_keyframes
 

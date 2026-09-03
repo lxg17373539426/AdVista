@@ -78,6 +78,49 @@ def test_heading_only_answers_are_incomplete() -> None:
     assert _answer_is_incomplete(answer)
 
 
+def test_unknown_answer_does_not_get_a_fixed_prefix() -> None:
+    from ad_vista_agent.agent.chat import normalize_conversation_answer, validate_conversation_answer
+
+    answer = normalize_conversation_answer(
+        ConversationAnswer(
+            answer="无法确认视频中的具体价格。",
+            epistemic_status="unknown",
+            unsupported_points=["当前证据没有明确价格信息。"],
+        )
+    )
+
+    validate_conversation_answer(answer, set())
+    assert answer.answer == "无法确认视频中的具体价格。"
+    assert not answer.answer.startswith("当前证据不足")
+
+
+def test_model_generated_uncertainty_prefix_is_removed() -> None:
+    from ad_vista_agent.agent.chat import normalize_conversation_answer
+
+    answer = normalize_conversation_answer(
+        ConversationAnswer(
+            answer="当前证据不足：无法确认视频中的具体价格。",
+            epistemic_status="unknown",
+        )
+    )
+
+    assert answer.answer == "无法确认视频中的具体价格。"
+
+
+def test_missing_refs_downgrade_without_rewriting_answer() -> None:
+    from ad_vista_agent.agent.chat import normalize_conversation_answer
+
+    answer = normalize_conversation_answer(
+        ConversationAnswer(
+            answer="视频中展示了一款越野车。",
+            epistemic_status="visual",
+        )
+    )
+
+    assert answer.epistemic_status == "unknown"
+    assert answer.answer == "视频中展示了一款越野车。"
+
+
 def test_visual_summary_can_use_presented_keyframes_when_model_omits_refs() -> None:
     answer = ConversationAnswer(
         answer="当前证据不足：视频开头展示米色外套，中间切换白色马甲，结尾展示棕色外套和格纹围巾，整体按多套秋冬穿搭推进。",
@@ -93,6 +136,23 @@ def test_visual_summary_can_use_presented_keyframes_when_model_omits_refs() -> N
 
     assert grounded.epistemic_status == "visual"
     assert grounded.evidence_refs == ["kf_0001_primary", "kf_0009_primary"]
+    assert not grounded.answer.startswith("当前证据不足")
+
+
+def test_visual_summary_can_use_numeric_time_range() -> None:
+    answer = ConversationAnswer(
+        answer="当前证据不足：视频的前五秒中，一位呈女性化风格的模特站在玩具货架前，画面出现开场文字。",
+        epistemic_status="unknown",
+    )
+
+    grounded = _ground_presented_visual_answer(
+        answer,
+        "视频前五秒讲了什么？",
+        [{"id": "kf_0001_primary"}],
+    )
+
+    assert grounded.epistemic_status == "visual"
+    assert grounded.evidence_refs == ["kf_0001_primary"]
     assert not grounded.answer.startswith("当前证据不足")
 
 

@@ -50,6 +50,7 @@ def _cache_payload(asset: AdAsset, settings: Settings) -> dict[str, Any]:
     return {
         "asset_sha256": asset.sha256,
         "stage": "stage_2_timeline",
+        "keyframe_strategy": "shot_start_v2",
         "schema_version": settings.project.schema_version,
         "scene_detector": settings.timeline.detector,
         "scene_detector_version": version("scenedetect"),
@@ -138,7 +139,9 @@ def build_timeline(video_path: Path, settings: Settings, *, force: bool = False)
         for stale_frame in frames_dir.glob("shot_*_primary.jpg"):
             stale_frame.unlink()
     for shot in timeline.shots:
-        timestamp_ms = shot.start_ms + shot.duration_ms // 2
+        # A shot midpoint hides the beginning of long shots from temporal questions.
+        # The first frame of each shot provides an actual temporal anchor instead.
+        timestamp_ms = shot.start_ms
         timestamp_ms = min(timestamp_ms, shot.end_ms - 1)
         relative_path = Path("timeline") / "frames" / f"{shot.shot_id}_primary.jpg"
         extracted = extractor.run(
@@ -157,7 +160,7 @@ def build_timeline(video_path: Path, settings: Settings, *, force: bool = False)
                 shot_id=shot.shot_id,
                 timestamp_ms=timestamp_ms,
                 frame_number=round(timestamp_ms * fps / 1000),
-                selection_reason="shot_midpoint",
+                selection_reason="shot_start",
                 artifact_path=relative_path,
                 artifact_sha256=extracted.sha256,
                 width=extracted.width,

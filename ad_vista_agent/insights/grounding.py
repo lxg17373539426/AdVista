@@ -120,4 +120,13 @@ def _claim_has_source_overlap(
         source_terms.update(_claim_terms(reference_content.get(reference, "")))
     # This is a conservative contradiction guard, not a full entailment proof.
     # Abstract marketing inferences may use different wording from their sources.
-    return bool(claim_terms.intersection(source_terms))
+    if claim_terms.intersection(source_terms):
+        return True
+    # A translated claim can be grounded in a speech transcript even when the
+    # transcript and output use different languages. OCR-only references still
+    # require visible lexical support so noise such as "37" cannot validate a
+    # made-up product or benefit.
+    return any(
+        reference.startswith("speech_") and reference_content.get(reference, "").strip()
+        for reference in references
+    )

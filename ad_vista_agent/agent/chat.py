@@ -269,11 +269,16 @@ def validate_conversation_answer(answer: ConversationAnswer, allowed_refs: set[s
     if answer.epistemic_status == "unknown":
         if answer.evidence_refs:
             raise ValueError("Unknown chat answer must not cite evidence")
-        if not answer.answer.startswith("当前证据不足"):
-            raise ValueError("Unknown chat answer must begin with 当前证据不足")
 
 
 def normalize_conversation_answer(answer: ConversationAnswer) -> ConversationAnswer:
+    cleaned_answer = re.sub(
+        r"^当前证据不足\s*[：:,，。]?\s*",
+        "",
+        answer.answer,
+    ).strip()
+    if cleaned_answer != answer.answer:
+        answer = answer.model_copy(update={"answer": cleaned_answer or "暂时无法确认。"})
     references = []
     for reference in answer.evidence_refs:
         value = reference.strip()
@@ -289,13 +294,10 @@ def normalize_conversation_answer(answer: ConversationAnswer) -> ConversationAns
             points.append(answer.answer)
         return answer.model_copy(
             update={
-                "answer": f"当前证据不足：{answer.answer}",
                 "epistemic_status": "unknown",
                 "unsupported_points": points[:12],
             }
         )
-    if answer.epistemic_status == "unknown" and not answer.answer.startswith("当前证据不足"):
-        return answer.model_copy(update={"answer": f"当前证据不足：{answer.answer}"})
     return answer
 
 
@@ -393,6 +395,14 @@ def _ground_presented_visual_answer(
             "开头",
             "中间",
             "结尾",
+            "前五秒",
+            "前几秒",
+            "前十秒",
+            "前十五秒",
+            "第一个镜头",
+            "第一镜",
+            "最开始的几秒",
+            "视频开始后的",
             "时间顺序",
             "展示",
             "穿搭",
@@ -426,7 +436,7 @@ def _ground_presented_visual_answer(
         for item in frames
         if str(item.get("id", "")).startswith("kf_")
     ]
-    if not eligible or blocked or len(text) < 40 or not references:
+    if not eligible or blocked or len(text) < 24 or not references:
         return answer
     return answer.model_copy(
         update={
@@ -807,14 +817,14 @@ def _qwen_answer(
         "问题中证据不足的部分必须单独写入 unsupported_points，不得伪装成有证据结论。"
         "evidence_refs 只能填写 EVIDENCE_CONTEXT 中真实存在的 speech_*、ocr_cluster_* 或 kf_* ID；"
         "不得填写 validated_insights:*、visual_observations:*、洞察 ID、字段名或自造 ID。"
-        "如果证据不足，epistemic_status 必须为 unknown，answer 必须以‘当前证据不足’开头，且 evidence_refs 为空。"
-        "unknown 状态的 answer 只能描述不能确认的内容，不得在‘当前证据不足’后继续给出确定结论。"
+        "如果证据不足，epistemic_status 必须为 unknown，evidence_refs 为空，并在 unsupported_points 中说明无法确认的内容；answer 不要使用‘当前证据不足’这类固定前缀，直接自然说明无法确认的事项。"
+        "unknown 状态的 answer 只能描述不能确认的内容，不得把不确定内容写成确定结论。"
         "涉及人物性别时，可以描述画面呈现为男性化、女性化或无法判断，但不得把外貌、发型、妆容或服饰推断为真实性别身份。"
         "材质和成分不能仅凭外观确认；可以描述视觉上像什么，但必须说明无法确认真实材质。"
         "不得把广告声明写成独立验证的客观事实，不得编造价格、成分、受众属性或视频内容。"
         "不要在 answer 正文中输出 speech_*、ocr_cluster_*、kf_* 等内部证据 ID，只放在 evidence_refs 字段。"
         "QUESTION 是用户本轮最新问题，必须优先重新检查当前视频后回答；会话历史仅用于理解指代，历史回答不是证据，不能机械重复。"
-        "涉及时间顺序时，必须使用 visual_keyframes 中的 timestamp_ms 换算秒数，不得凭空估计时间；没有时间证据时不要写具体秒数。"
+        "涉及时间顺序时，必须使用 visual_keyframes 中的 timestamp_ms 和镜头时间范围换算秒数，不得凭空估计时间；关键帧 timestamp_ms 是该图片的采样时间，不是视频首次出现画面的时间，不能据此推断此前没有画面；没有时间证据时不要写具体秒数。"
     )
     if intent == "marketing":
         prompt += (
