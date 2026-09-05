@@ -47,7 +47,7 @@ def test_report_frontend_skill_is_packaged_and_drives_cache() -> None:
     packaging = (root / "pyproject.toml").read_text(encoding="utf-8")
 
     assert skill.is_file()
-    assert "editorial-industrial" in skill.read_text(encoding="utf-8")
+    assert "minimal, light" in skill.read_text(encoding="utf-8")
     assert '"frontend_skill_sha256"' in builder
     assert '"skills/*/SKILL.md"' in packaging
 
