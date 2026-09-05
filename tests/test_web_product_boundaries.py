@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any, cast
 
 
 STATIC = Path(__file__).resolve().parents[1] / "ad_vista_agent" / "web" / "static"
@@ -129,10 +130,12 @@ def test_general_chat_persists_and_restores_session() -> None:
     assert "event.session_id&&!state.run" in script
 
 
-def test_chat_evidence_is_not_rendered_to_users() -> None:
+def test_chat_evidence_is_rendered_to_users() -> None:
     script = (STATIC / "app.js").read_text(encoding="utf-8")
 
-    assert "function renderCitations(){return}" in script
+    assert "function renderCitations(row,citations=[])" in script
+    assert "查看 ${citations.length} 条依据" in script
+    assert "thumbnail_url" in script
 
 
 def test_video_conversation_seeds_upload_and_completion_messages() -> None:
@@ -282,6 +285,71 @@ def test_visual_batches_overlap_without_duplicate_only_batch() -> None:
     assert _visual_batch_starts(9, 8, 1) == [0, 7]
     assert _visual_batch_starts(15, 8, 1) == [0, 7]
     assert _visual_batch_starts(16, 8, 1) == [0, 7, 14]
+
+
+def test_visual_batch_json_failure_is_split_and_retried(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from ad_vista_agent.insights.builder import _visual_observations
+    from ad_vista_agent.schemas import Keyframe
+    from ad_vista_agent.tools.qwen import QwenInsightResult
+
+    frame_dir = tmp_path / "timeline" / "frames"
+    frame_dir.mkdir(parents=True)
+    keyframes = []
+    for index in range(2):
+        filename = frame_dir / f"frame_{index}.jpg"
+        filename.write_bytes(b"fake image")
+        keyframes.append(
+            Keyframe(
+                keyframe_id=f"kf_{index}",
+                asset_id="asset_test",
+                shot_id=f"shot_{index}",
+                timestamp_ms=index * 1000,
+                frame_number=index,
+                selection_reason="shot_start",
+                artifact_path=filename.relative_to(tmp_path),
+                artifact_sha256="0" * 64,
+                width=1,
+                height=1,
+            )
+        )
+
+    class FakeTool:
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, context, arguments):
+            self.calls += 1
+            if self.calls == 1:
+                raise ValueError("malformed visual JSON")
+            item = arguments["messages"][1]["content"][1]["text"].split("，")[0].split()[-1]
+            return QwenInsightResult(
+                text=f'{{"observations":[{{"keyframe_id":"{item}","description":"可见产品"}}]}}',
+                attempts=["ok"],
+                attempt_count=1,
+                prompt_tokens=1,
+                completion_tokens=1,
+                versions={"vllm": "0.19.1", "torch": "2.10.0", "transformers": "5.13.0"},
+            )
+
+    settings = SimpleNamespace(
+        insight=SimpleNamespace(
+            max_images_per_prompt=2,
+            visual_batch_overlap=0,
+            model="model",
+            max_model_len=1024,
+            gpu_memory_utilization=0.8,
+        ),
+        hardware=SimpleNamespace(gpu_memory_utilization=0.8, cuda_visible_devices="0"),
+        model_path=lambda model: tmp_path,
+    )
+    observations, attempts, _, _ = _visual_observations(
+        tmp_path, keyframes, cast(Any, settings), cast(Any, FakeTool()), "exec_test"
+    )
+
+    assert {item.keyframe_id for item in observations} == {"kf_0", "kf_1"}
+    assert any(item.startswith("visual_batch_failed:0") for item in attempts)
 
 
 def test_qwen_runtime_defaults_are_consistent() -> None:

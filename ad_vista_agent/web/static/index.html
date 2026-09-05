@@ -28,14 +28,17 @@
         <div class="header-actions"><button id="refresh" class="icon-button" title="刷新">↻</button></div>
       </header>
 
-      <section id="conversation" class="conversation">
-        <div id="welcome" class="welcome">
+       <section id="conversation" class="conversation">
+         <div id="context-bar" class="context-bar hidden"></div>
+         <div id="context-bar" class="context-bar hidden"></div>
+         <div id="welcome" class="welcome">
           <div class="welcome-mark">✦</div>
           <h1>有什么可以帮你？</h1>
           <p>可以直接聊天，也可以附加广告视频，让我分析画面、语音、字幕、卖点和创意。</p>
         </div>
         <div id="messages" class="messages"></div>
-        <div id="job" class="job hidden" role="status" aria-live="polite"></div>
+         <div id="job" class="job hidden" role="status" aria-live="polite"></div>
+         <div id="run-status" class="run-status hidden" role="status"></div>
         <div id="boot-error" class="error-text hidden" role="alert"></div>
       </section>
 
@@ -47,7 +50,7 @@
             <div class="plus-wrap">
               <button id="composer-plus" class="attach-button" type="button" title="添加视频或选择交付物" aria-expanded="false" aria-controls="composer-menu">＋</button>
               <div id="composer-menu" class="composer-menu hidden">
-                <label class="menu-upload"><input id="video" name="video" type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm"><span><strong>附加广告视频</strong><small>MP4、MOV、MKV 或 WebM</small></span></label>
+                 <label class="menu-upload"><input id="video" name="video" type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm,video/x-msvideo,video/x-m4v"><span><strong>附加广告视频</strong><small>MP4、MOV、MKV、WebM、AVI 或 M4V · 最大 1 GB / 10 分钟 / 4K</small></span></label>
                 <div class="menu-divider"></div>
                 <div class="deliverable-heading"><strong>选择一种任务</strong><small>每项任务只负责一个清晰目标</small></div>
                 <label class="deliverable-option"><input type="radio" name="deliverable" value="evidence"><span><strong>证据提取</strong><small>只提取字幕、语音和 OCR</small></span></label>

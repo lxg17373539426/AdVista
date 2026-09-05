@@ -1,5 +1,8 @@
+from typing import Any, cast
+
 from ad_vista_agent.agent.chat import (
     _answer_is_incomplete,
+    _answer_with_video_fallback,
     _answer_matches_intent,
     _ground_presented_visual_answer,
     _normalize_model_references,
@@ -208,3 +211,38 @@ def test_visual_identity_and_material_claims_are_softened() -> None:
 
     assert "呈女性化风格" in normalized.answer
     assert "羊羔毛外观的毛绒外套" in normalized.answer
+
+
+def test_video_answer_retries_unreviewed_keyframes(monkeypatch, tmp_path) -> None:
+    from ad_vista_agent import agent as agent_package
+
+    frames = [
+        {"id": f"kf_{index}", "artifact_path": f"{index}.jpg", "timestamp_ms": index * 1000}
+        for index in range(4)
+    ]
+    context = {"visual_keyframes": frames, "visual_observations": []}
+    calls = []
+
+    def fake_answer(question, context, history, settings, **kwargs):
+        batch = kwargs["image_frames"]
+        calls.append([item["id"] for item in batch])
+        if len(calls) == 1:
+            return ConversationAnswer(
+                answer="无法从当前已查看的画面确认。",
+                epistemic_status="unknown",
+            )
+        return ConversationAnswer(
+            answer="视频中展示了蓝色包装的产品。",
+            evidence_refs=[batch[0]["id"]],
+            epistemic_status="visual",
+        )
+
+    monkeypatch.setattr(agent_package.chat, "_qwen_answer", fake_answer)
+    settings = type("Settings", (), {"insight": type("Insight", (), {"max_images_per_prompt": 2})()})()
+    answer, reviewed = _answer_with_video_fallback(
+        "视频中展示了什么产品？", context, [], cast(Any, settings), tmp_path
+    )
+
+    assert calls == [["kf_0", "kf_3"], ["kf_1", "kf_2"]]
+    assert reviewed == frames[1:3]
+    assert answer.epistemic_status == "visual"

@@ -156,8 +156,12 @@ def _visual_observations(
     completion_tokens = 0
     batch_size = settings.insight.max_images_per_prompt
     overlap = min(settings.insight.visual_batch_overlap, batch_size - 1)
-    for start in _visual_batch_starts(len(keyframes), batch_size, overlap):
-        batch = keyframes[start : start + batch_size]
+    def process_batch(
+        batch: list[Keyframe], label: str, *, retry: bool = False
+    ) -> None:
+        nonlocal prompt_tokens, completion_tokens
+        if not batch:
+            return
         messages = [
             {"role": "system", "content": _visual_prompt()},
             {
@@ -165,32 +169,58 @@ def _visual_observations(
                 "content": [
                     {
                         "type": "text",
-                        "text": "请分析以下关键帧，不要遗漏任何一帧。",
+                        "text": (
+                            "请逐帧返回观察，不要遗漏任何一帧。"
+                            if not retry
+                            else "请用极简中文逐帧返回观察；每帧 description 不超过 30 字，字段为空也必须返回。"
+                        ),
                     },
                     *_visual_content(run_dir, batch),
                 ],
             },
         ]
-        result = tool.run(
-            ToolContext(run_id=run_id, run_dir=run_dir),
-            {
-                "model_path": str(settings.model_path(settings.insight.model)),
-                "gpu_memory_utilization": settings.insight.gpu_memory_utilization,
-                "max_model_len": settings.insight.max_model_len,
-                "max_tokens": 900,
-                "temperature": 0.0,
-                "messages": messages,
-                "output_schema": FrameObservationBatch.model_json_schema(),
-            },
-        )
-        attempts.extend(result.attempts)
-        prompt_tokens += result.prompt_tokens
-        completion_tokens += result.completion_tokens
-        parsed = FrameObservationBatch.model_validate(_extract_json(result.text))
+        try:
+            result = tool.run(
+                ToolContext(run_id=run_id, run_dir=run_dir),
+                {
+                    "model_path": str(settings.model_path(settings.insight.model)),
+                    "gpu_memory_utilization": settings.insight.gpu_memory_utilization,
+                    "max_model_len": settings.insight.max_model_len,
+                    "max_tokens": (
+                        900
+                        if not retry
+                        else min(1600, max(500, len(batch) * 350))
+                    ),
+                    "temperature": 0.0,
+                    "messages": messages,
+                    "output_schema": FrameObservationBatch.model_json_schema(),
+                },
+            )
+            attempts.extend(result.attempts)
+            prompt_tokens += result.prompt_tokens
+            completion_tokens += result.completion_tokens
+            parsed = FrameObservationBatch.model_validate(_extract_json(result.text))
+        except Exception as exc:
+            attempts.append(f"visual_batch_failed:{label}:{type(exc).__name__}")
+            if len(batch) > 1:
+                midpoint = max(1, len(batch) // 2)
+                process_batch(batch[:midpoint], f"{label}.a", retry=True)
+                process_batch(batch[midpoint:], f"{label}.b", retry=True)
+            return
         expected = {item.keyframe_id for item in batch}
         for item in parsed.observations:
             if item.keyframe_id in expected:
                 observations_by_id[item.keyframe_id] = item
+        missing = [item for item in batch if item.keyframe_id not in observations_by_id]
+        if missing:
+            if len(batch) == 1:
+                attempts.append(f"visual_frame_missing:{label}")
+            else:
+                process_batch(missing, f"{label}.missing", retry=True)
+
+    for start in _visual_batch_starts(len(keyframes), batch_size, overlap):
+        batch = keyframes[start : start + batch_size]
+        process_batch(batch, str(start))
     observations = [
         observations_by_id[item.keyframe_id]
         for item in keyframes

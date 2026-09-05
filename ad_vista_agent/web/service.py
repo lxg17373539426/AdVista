@@ -66,10 +66,13 @@ class WebService:
 
     def validate_uploaded_video(self, path: Path) -> None:
         path = self.allowed_media_path(path)
-        metadata = VideoProbeTool(
-            self.settings.tools.ffprobe_executable,
-            self.settings.tools.probe_timeout_seconds,
-        ).run(ToolContext(run_id="upload_validation", run_dir=path.parent), {"video_path": path})
+        try:
+            metadata = VideoProbeTool(
+                self.settings.tools.ffprobe_executable,
+                self.settings.tools.probe_timeout_seconds,
+            ).run(ToolContext(run_id="upload_validation", run_dir=path.parent), {"video_path": path})
+        except (RuntimeError, ValueError) as exc:
+            raise ValueError("无法读取该视频，请确认文件未损坏且包含有效的视频轨道") from exc
         if metadata.duration_ms > self.settings.web.max_video_duration_seconds * 1000:
             raise ValueError(
                 f"Video duration exceeds {self.settings.web.max_video_duration_seconds} seconds"
@@ -362,6 +365,14 @@ class WebService:
                 completed = [call.get("tool") for call in calls if call.get("status") == "completed"]
                 job["current_tool"] = running.get("tool") if running else None
                 job["completed_tools"] = completed
+                steps = (session.get("plan") or {}).get("steps") or []
+                total = len(steps)
+                job["progress"] = {
+                    "completed": len(completed),
+                    "total": total,
+                    "percent": round(len(completed) / total * 100) if total else 0,
+                    "current_stage": running.get("tool") if running else None,
+                }
         return job
 
     def cancel_job(self, job_id: str) -> dict[str, Any]:
@@ -452,7 +463,14 @@ class WebService:
         summary["status"] = status
         summary["status_label"] = labels.get(status, status)
         summary["requires_action"] = status == "waiting_confirmation"
-        summary["error"] = agent.get("error") or orchestration.get("error")
+        raw_error = str(agent.get("error") or orchestration.get("error") or "")
+        summary["error"] = self._public_error(raw_error) if raw_error else None
+        request_value = agent.get("request")
+        plan_value = agent.get("plan")
+        request: dict[str, Any] = request_value if isinstance(request_value, dict) else {}
+        plan: dict[str, Any] = plan_value if isinstance(plan_value, dict) else {}
+        summary["goal"] = request.get("goal") or plan.get("goal") or "视频分析"
+        summary["deliverables"] = list(agent.get("deliverables") or plan.get("deliverables") or [])
         summary.pop("agent", None)
         summary.pop("orchestration", None)
         return summary
@@ -494,9 +512,12 @@ class WebService:
         if state is not None:
             result["agent"] = state.model_dump(mode="json")
             result["artifacts"]["agent"] = True
+            if str(getattr(state.status, "value", state.status)) == "failed":
+                result["public_error"] = self._public_error(str(state.error or ""))
         asset_path = run_dir / "asset.json"
         if asset_path.is_file():
             asset = self.store.read_json(asset_path)
+            result["duration_ms"] = (asset.get("metadata") or {}).get("duration_ms")
             source_path = Path(str(asset.get("source_path", "")))
             display_name_path = source_path.with_suffix(source_path.suffix + ".name")
             filename = str(asset.get("filename", "video"))

@@ -258,7 +258,13 @@ class _Handler(BaseHTTPRequestHandler):
                         return self._error(409, "当前视频没有可验证洞察，无法下载空报告")
                     relative, content_type = EXPORTS[parts[4]]
                     export_root = run_dir if parts[4].startswith("evidence-") else artifact_root
-                    return self._send_file(_contained(export_root, relative), content_type, attachment=True)
+                    download = query.get("download", [""])[0] == "1"
+                    # HTML exports open in the browser unless the user explicitly downloads them.
+                    return self._send_file(
+                        _contained(export_root, relative),
+                        content_type,
+                        attachment=download or not content_type.startswith("text/html"),
+                    )
             if parts == ["app.js"] or parts == ["styles.css"]:
                 path = self.static_root / parts[0]
                 return self._send_file(path)

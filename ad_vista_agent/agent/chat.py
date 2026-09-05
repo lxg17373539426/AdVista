@@ -408,6 +408,17 @@ def _ground_presented_visual_answer(
             "穿搭",
             "外观",
             "画面",
+            "产品",
+            "商品",
+            "品牌",
+            "包装",
+            "颜色",
+            "人物",
+            "模特",
+            "场景",
+            "动作",
+            "文字",
+            "logo",
             "卖点",
             "营销方案",
             "营销策略",
@@ -463,8 +474,18 @@ def repair_grounded_references(
     question: str,
     context: dict[str, Any],
 ) -> ConversationAnswer:
-    del question, context
-    return answer
+    del question
+    allowed_refs = {str(item) for item in context.get("allowed_refs", [])}
+    references = [ref for ref in answer.evidence_refs if ref in allowed_refs]
+    if references == answer.evidence_refs:
+        return answer
+    update: dict[str, Any] = {"evidence_refs": references}
+    if answer.epistemic_status in {"grounded", "visual"} and not references:
+        points = list(answer.unsupported_points)
+        if answer.answer not in points:
+            points.append(answer.answer)
+        update.update(epistemic_status="unknown", unsupported_points=points[:12])
+    return answer.model_copy(update=update)
 
 
 def _is_greeting(question: str) -> bool:
@@ -568,19 +589,26 @@ def _seed_conversation(
     conversations.add_message(state.session_id, "user", state.request.goal, [])
     if state.plan.response_mode == "answer":
         return conversations.messages(state.session_id)
-    generated = {
-        "evidence": "证据提取",
-        "insights": "卖点分析",
-        "risk_audit": "风险复核",
-        "report": "卖点分析报告",
-        "creative": "创意建议",
-    }
-    labels = [generated[item] for item in state.deliverables if item in generated]
-    summary = "、".join(labels) if labels else "视频分析"
+    status = str(getattr(state.status, "value", state.status))
+    if status == "failed":
+        message = "视频任务未完成。请查看上方失败原因，修复后可以重试。"
+    elif status == "waiting_confirmation":
+        message = "视频分析已生成，等待你确认后继续。"
+    else:
+        generated = {
+            "evidence": "证据提取",
+            "insights": "卖点分析",
+            "risk_audit": "风险复核",
+            "report": "卖点分析报告",
+            "creative": "创意建议",
+        }
+        labels = [generated[item] for item in state.deliverables if item in generated]
+        summary = "、".join(labels) if labels else "视频分析"
+        message = f"{summary}已完成。你可以继续询问当前视频，或让我根据分析结果制定营销方案。"
     conversations.add_message(
         state.session_id,
         "assistant",
-        f"{summary}已完成。你可以继续询问当前视频，或让我根据分析结果制定营销方案。",
+        message,
         [],
     )
     return conversations.messages(state.session_id)
@@ -714,6 +742,68 @@ def _relevant_keyframes(
         if len(selected) == limit:
             break
     return selected
+
+
+def _fallback_keyframe_batches(
+    context: dict[str, Any],
+    reviewed: list[dict[str, Any]],
+    limit: int = MAX_IMAGES_PER_PROMPT,
+) -> list[list[dict[str, Any]]]:
+    reviewed_ids = {str(item.get("id")) for item in reviewed}
+    remaining = [
+        item
+        for item in context.get("visual_keyframes", [])
+        if str(item.get("id")) not in reviewed_ids
+    ]
+    return [remaining[index : index + limit] for index in range(0, len(remaining), limit)]
+
+
+def _answer_with_video_fallback(
+    question: str,
+    context: dict[str, Any],
+    history: list[dict[str, Any]],
+    settings: Settings,
+    run_dir: Path,
+    *,
+    intent: str = "answer",
+) -> tuple[ConversationAnswer, list[dict[str, Any]]]:
+    frames = _relevant_keyframes(question, context, settings.insight.max_images_per_prompt)
+
+    def review(batch: list[dict[str, Any]]) -> ConversationAnswer:
+        try:
+            raw = _qwen_answer(
+                question,
+                context,
+                history,
+                settings,
+                run_dir=run_dir,
+                include_images=True,
+                image_frames=batch,
+                intent=intent,
+            )
+        except (RuntimeError, ValueError):
+            return ConversationAnswer(
+                answer="暂时无法确认这个问题，但可以继续根据视频画面和已有证据尝试回答。",
+                epistemic_status="unknown",
+            )
+        return _ground_presented_visual_answer(
+            normalize_conversation_answer(_normalize_model_references(raw, context)),
+            question,
+            batch,
+        )
+
+    answer = review(frames)
+    if answer.epistemic_status != "unknown":
+        return answer, frames
+    for batch in _fallback_keyframe_batches(
+        context, frames, settings.insight.max_images_per_prompt
+    ):
+        candidate = review(batch)
+        if candidate.epistemic_status != "unknown":
+            return candidate, batch
+        if len(candidate.answer.strip()) > len(answer.answer.strip()):
+            answer, frames = candidate, batch
+    return answer, frames
 
 
 def _presented_keyframe_refs(
@@ -1003,23 +1093,14 @@ def ask_agent(
         )
     elif _is_direct_marketing_summary(value) or _is_marketing_request(value):
         direct_summary = _is_direct_marketing_summary(value)
-        image_frames = _relevant_keyframes(
-            value, context, settings.insight.max_images_per_prompt
-        )
-        raw_answer = _qwen_answer(
+        answer, image_frames = _answer_with_video_fallback(
             value,
             context,
             history,
             settings,
-            run_dir=run_dir,
-            include_images=True,
-            image_frames=image_frames,
+            run_dir,
             intent="answer" if direct_summary else "marketing",
         )
-        answer = normalize_conversation_answer(
-            _normalize_model_references(raw_answer, context)
-        )
-        answer = _ground_presented_visual_answer(answer, value, image_frames)
         keyframe_refs = _presented_keyframe_refs(
             run_dir, context, image_frames, settings.insight.max_images_per_prompt
         )
@@ -1095,22 +1176,13 @@ def ask_agent(
             epistemic_status="conversational",
         )
     else:
-        image_frames = _relevant_keyframes(
-            value, context, settings.insight.max_images_per_prompt
+        answer, image_frames = _answer_with_video_fallback(
+            value,
+            context,
+            history,
+            settings,
+            run_dir,
         )
-        raw_answer = _qwen_answer(
-                value,
-                context,
-                history,
-                settings,
-                run_dir=run_dir,
-                include_images=True,
-                image_frames=image_frames,
-            )
-        answer = normalize_conversation_answer(
-            _normalize_model_references(raw_answer, context)
-        )
-        answer = _ground_presented_visual_answer(answer, value, image_frames)
         keyframe_refs = _presented_keyframe_refs(
             run_dir, context, image_frames, settings.insight.max_images_per_prompt
         )
@@ -1124,6 +1196,11 @@ def ask_agent(
         } | observed_keyframe_refs | keyframe_refs | _insight_evidence_refs(context)
     answer = _sanitize_answer_timing(answer, context, value)
     answer = _normalize_visual_claim_language(answer)
+    answer = repair_grounded_references(
+        answer,
+        value,
+        {**context, "allowed_refs": allowed_refs},
+    )
     validate_conversation_answer(answer, allowed_refs)
     answer = answer.model_copy(update={"answer": _strip_evidence_ids(answer.answer)})
     seeded_question = bool(
