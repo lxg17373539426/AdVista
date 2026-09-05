@@ -25,4 +25,4 @@ advista-agent = "ad_vista_agent.cli:app"
 include = ["ad_vista_agent*"]
 
 [tool.setuptools.package-data]
-ad_vista_agent = ["resources/*.yaml", "resources/*.txt", "web/static/*"]
+ad_vista_agent = ["resources/*.yaml", "resources/*.txt", "skills/*/SKILL.md", "web/static/*"]

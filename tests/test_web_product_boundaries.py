@@ -40,6 +40,82 @@ def test_workspace_uses_codex_inspired_neutral_palette() -> None:
     assert "--accent: #d97745" in styles
 
 
+def test_report_frontend_skill_is_packaged_and_drives_cache() -> None:
+    root = STATIC.parents[2]
+    skill = root / "ad_vista_agent" / "skills" / "report_frontend" / "SKILL.md"
+    builder = (root / "ad_vista_agent" / "reports" / "builder.py").read_text(encoding="utf-8")
+    packaging = (root / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert skill.is_file()
+    assert "editorial-industrial" in skill.read_text(encoding="utf-8")
+    assert '"frontend_skill_sha256"' in builder
+    assert '"skills/*/SKILL.md"' in packaging
+
+
+def test_html_report_uses_frontend_skill_design_contract(tmp_path: Path) -> None:
+    from ad_vista_agent.reports.render import render_html_report
+    from ad_vista_agent.schemas import (
+        CriticAudit,
+        EpistemicStatus,
+        GroundedMarketingInsight,
+        InsightAudit,
+        InsightAuditStatus,
+        MarketingAnalysis,
+        MarketingDimension,
+    )
+
+    analysis = MarketingAnalysis(
+        asset_id="asset_1",
+        language="zh",
+        subject="清爽控油洁面广告",
+        executive_summary="广告通过使用场景和产品特写突出清爽控油卖点。",
+        insights=[
+            GroundedMarketingInsight(
+                insight_id="selling_1",
+                dimension=MarketingDimension.SELLING_POINT,
+                claim="核心卖点是清爽控油",
+                evidence_refs=["ocr_1"],
+                confidence=0.8,
+                epistemic_status=EpistemicStatus.STATED_BY_AD,
+                reasoning_summary="画面文字直接呈现该产品主张。",
+            )
+        ],
+        unknowns=["缺少长期效果证据"],
+    )
+    audit = CriticAudit(
+        asset_id="asset_1",
+        status=InsightAuditStatus.PASS,
+        insight_count=1,
+        passed_count=1,
+        review_count=0,
+        failed_count=0,
+        insights=[
+            InsightAudit(
+                insight_id="selling_1",
+                status=InsightAuditStatus.PASS,
+                findings=[],
+                evidence=[],
+            )
+        ],
+        global_findings=[],
+    )
+
+    report = render_html_report(
+        analysis,
+        audit,
+        run_dir=tmp_path,
+        embed_images=True,
+        max_image_bytes=500_000,
+        max_evidence_per_insight=4,
+    )
+
+    assert 'content="AdVista report-frontend-v1"' in report
+    assert 'class="dimension featured"' in report
+    assert "重点" in report
+    assert "@media(max-width:780px)" in report
+    assert "<script" not in report
+
+
 def test_switching_runs_isolated_from_stale_requests() -> None:
     script = (STATIC / "app.js").read_text(encoding="utf-8")
 

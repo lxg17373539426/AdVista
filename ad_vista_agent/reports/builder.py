@@ -22,12 +22,13 @@ from ad_vista_agent.schemas import (
     MarketingAnalysis,
     AdAsset,
 )
+from ad_vista_agent.skills import REPORT_FRONTEND_SKILL, report_frontend_skill_fingerprint
 
 from .critic import audit_analysis
 from .render import render_html_report, render_markdown_report
 
 
-REPORT_PIPELINE_VERSION = "6"
+REPORT_PIPELINE_VERSION = "7"
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
@@ -52,6 +53,8 @@ def _cache_payload(
         "stage": "stage_7_report",
         "schema_version": settings.project.schema_version,
         "report_pipeline_version": REPORT_PIPELINE_VERSION,
+        "frontend_skill": REPORT_FRONTEND_SKILL,
+        "frontend_skill_sha256": report_frontend_skill_fingerprint(),
         "source_artifacts": {path.name: sha256_file(path) for path in artifacts},
         "report": settings.report.model_dump(mode="json"),
         "task": request.model_dump(mode="json") if request is not None else None,
