@@ -13,7 +13,6 @@ Agent 控制层使用 **LangGraph ReAct**，使用 LangChain 的 Structured Tool
 - **PaddleOCR**：DeepSeek-OCR 不可用时的 OCR 备用方案。
 - **PySceneDetect**：检测视频镜头和场景切换。
 
-模型权重不会上传到 GitHub，需要在本地单独下载。
 
 ## 安装
 
@@ -64,19 +63,6 @@ export QWEN_PYTHON=/path/to/vllm/bin/python
 bash scripts/start_qwen_server.sh
 ```
 
-### 3. 启动 Web 页面
-
-```bash
-.venv/bin/advista-agent serve --config configs/local.yaml
-```
-
-浏览器打开：
-
-```text
-http://127.0.0.1:8080
-```
-
-如果使用 VSCode Remote SSH，可以在 VSCode 的 `PORTS` 面板转发 `8080` 端口，然后点击 `Open in Browser`。
 
 ## 命令行运行
 
@@ -93,9 +79,3 @@ http://127.0.0.1:8080
 ```bash
 .venv/bin/advista-agent run /path/to/ad.mp4 --config configs/local.yaml
 ```
-
-运行结果保存在 `outputs/` 目录中。视频、模型权重和运行结果默认不会提交到 GitHub。
-
-## 注意
-
-Web 服务默认只监听本机地址 `127.0.0.1`，不建议直接暴露到公网。
