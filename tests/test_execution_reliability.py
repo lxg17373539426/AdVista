@@ -51,6 +51,45 @@ def test_langgraph_rejects_plan_that_exceeds_tool_budget(monkeypatch) -> None:
             raise AssertionError("an over-budget plan was accepted")
 
 
+def test_run_agent_passes_one_ingestion_to_langgraph(monkeypatch) -> None:
+    from ad_vista_agent.agent.core import run_agent
+
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        video = root / "video.mp4"
+        video.write_bytes(b"video")
+        settings = _settings(root)
+        ingestion = {
+            "status": "ok",
+            "run_id": "ingest_test",
+            "run_dir": str(root / "outputs" / "runs" / "ingest_test"),
+            "asset": {"asset_id": "asset_test"},
+        }
+        calls: list[Path] = []
+
+        def fake_ingest(path, loaded):
+            del loaded
+            calls.append(path)
+            return ingestion
+
+        def fake_langgraph(path, loaded, request, **kwargs):
+            del path, loaded, request
+            assert kwargs["ingestion"] is ingestion
+            return {"status": "completed"}
+
+        monkeypatch.setattr("ad_vista_agent.ingestion.ingest_video", fake_ingest)
+        monkeypatch.setattr(
+            "ad_vista_agent.agent.langgraph_backend.run_langgraph_agent", fake_langgraph
+        )
+        run_agent(
+            video,
+            settings,
+            AgentRequest(goal="只登记视频"),
+            registry=build_agent_registry(settings),
+        )
+        assert calls == [video.resolve()]
+
+
 def test_legacy_force_tool_reexecutes_completed_step() -> None:
     with TemporaryDirectory() as directory:
         root = Path(directory)

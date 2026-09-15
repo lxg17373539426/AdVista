@@ -227,14 +227,47 @@ class WebService:
             },
         )
 
+    def _select_plan(self, request: AgentRequest, registry: Any) -> Any:
+        if request.deliverables:
+            return rule_plan(request)
+        try:
+            return qwen_plan(request, registry, self.settings)
+        except Exception:
+            LOGGER.warning(
+                "Qwen planner unavailable; falling back to rule planner",
+                exc_info=True,
+                extra={"run_id": None, "execution_id": None, "job_id": None},
+            )
+            return rule_plan(request)
+
     @staticmethod
-    def _classify_failure(message: str) -> dict[str, Any]:
+    def _classify_failure(message: str, exc: Exception | None = None) -> dict[str, Any]:
         """Map an internal error into a user-actionable failure classification.
 
         Returns a stable machine code, a coarse category, a public message and
         a concrete next step. Internal paths, stack traces and model protocol
         details are never included.
         """
+        from ad_vista_agent.errors import AdVistaError
+
+        current = exc
+        while current is not None:
+            if isinstance(current, AdVistaError):
+                for item in (
+                    "cancelled",
+                    "evidence_incomplete",
+                    "invalid_video",
+                    "context_overflow",
+                    "image_limit",
+                    "grounding_failed",
+                    "model_timeout",
+                    "model_unavailable",
+                    "output_invalid",
+                    "tool_failed",
+                ):
+                    if item == current.code:
+                        return WebService._failure_for_code(item, current.retryable)
+            current = current.__cause__
         value = message.casefold()
         if "cancel" in value:
             return {
@@ -328,6 +361,23 @@ class WebService:
             "advice": "请稍后重试；如果问题持续，请重新上传视频或联系管理员。",
             "retryable": True,
         }
+
+    @staticmethod
+    def _failure_for_code(code: str, retryable: bool) -> dict[str, Any]:
+        messages = {
+            "model_timeout": ("model_unavailable", "视频分析服务响应超时。", "请稍后重试；若视频较长，可尝试更短的片段。"),
+            "model_unavailable": ("model_unavailable", "视频分析服务暂时不可用。", "请稍后重试；如果问题持续，请联系管理员确认模型服务状态。"),
+            "output_invalid": ("validation", "分析结果没有通过格式校验。", "请重新运行；若持续失败，可尝试更明确的任务描述。"),
+            "grounding_failed": ("validation", "模型输出没有通过证据引用校验。", "系统已阻止这个不一致的结果，请重新运行或换一个更具体的问题。"),
+            "invalid_video": ("input_video", "无法读取这个视频文件。", "请确认文件未损坏、包含视频轨道，并符合格式、时长和分辨率限制后重新上传。"),
+            "tool_failed": ("processing", "视频处理失败。", "请稍后重试；如果问题持续，请重新上传视频或联系管理员。"),
+            "cancelled": ("cancelled", "任务已取消。", "已完成的中间结果仍然保留，你可以重新提交。"),
+            "evidence_incomplete": ("evidence", "视频证据尚未准备完成。", "请重新提交视频，或稍后重试以保证语音、OCR 和关键帧证据完整。"),
+            "context_overflow": ("model_limit", "视频内容超出模型单次可处理的长度。", "请尝试使用更短的视频，或改为更聚焦的任务。"),
+            "image_limit": ("model_limit", "关键帧数量超过当前服务的图片上限。", "这是服务侧的批次限制，请稍后重试。"),
+        }
+        category, public_message, advice = messages.get(code, messages["tool_failed"])
+        return {"code": code, "category": category, "message": public_message, "advice": advice, "retryable": retryable}
 
     @classmethod
     def _public_error(cls, message: str) -> str:
@@ -609,7 +659,7 @@ class WebService:
         try:
             request = AgentRequest(goal=goal, deliverables=deliverables, mode=mode)
             registry = build_agent_registry(self.settings)
-            plan = rule_plan(request) if deliverables else qwen_plan(request, registry, self.settings)
+            plan = self._select_plan(request, registry)
             self._update_job(
                 job_id,
                 response_mode=plan.response_mode,
@@ -676,7 +726,7 @@ class WebService:
         except Exception as exc:
             detail = str(exc)[-4000:]
             LOGGER.exception("Video job %s failed: %s", job_id, detail)
-            failure = self._classify_failure(detail)
+            failure = self._classify_failure(detail, exc)
             self._update_job(
                 job_id,
                 status="failed",

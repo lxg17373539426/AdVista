@@ -29,6 +29,7 @@ from ad_vista_agent.tools import QwenInsightTool, ToolContext
 from .grounding import (
     grounded_executive_summary,
     normalize_inline_citations,
+    normalize_ocr_cluster_references,
     validate_analysis_grounding,
 )
 from .payload import build_ledger_payload
@@ -336,6 +337,11 @@ def build_insights(
     allowed_refs = {
         item.evidence_id for item in evidence if item.modality.value == "speech"
     } | {item.cluster_id for item in clusters} | {item.keyframe_id for item in keyframes}
+    evidence_to_cluster = {
+        evidence_id: cluster.cluster_id
+        for cluster in clusters
+        for evidence_id in cluster.member_evidence_ids
+    }
     reference_content = {
         **{item.evidence_id: item.content for item in evidence},
         **{item.cluster_id: item.canonical_content for item in clusters},
@@ -352,7 +358,10 @@ def build_insights(
             and artifact_hashes.get("visual_observations") == sha256_file(published_visual_observations_path)
             and artifact_hashes.get("raw_response") == sha256_file(published_raw_path)
         ):
-            analysis = MarketingAnalysis.model_validate(store.read_json(published_analysis_path))
+            analysis = normalize_ocr_cluster_references(
+                MarketingAnalysis.model_validate(store.read_json(published_analysis_path)),
+                evidence_to_cluster,
+            )
             validate_analysis_grounding(
                 analysis,
                 asset_id=ledger.asset_id,
@@ -446,7 +455,10 @@ def build_insights(
     )
     try:
         parsed = _extract_json(result.text)
-        analysis = normalize_inline_citations(MarketingAnalysis.model_validate(parsed))
+        analysis = normalize_ocr_cluster_references(
+            normalize_inline_citations(MarketingAnalysis.model_validate(parsed)),
+            evidence_to_cluster,
+        )
     except Exception as exc:
         raise ValueError(f"Qwen structured output remained invalid after repair: {exc}") from exc
     validate_analysis_grounding(

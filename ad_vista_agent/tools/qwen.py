@@ -12,6 +12,7 @@ from typing import Any
 
 from .base import Tool, ToolContext
 from ad_vista_agent.runtime.process import ProcessCancelled, run_process
+from ad_vista_agent.errors import ModelTimeoutError, ModelUnavailableError
 
 
 MAX_IMAGES_PER_PROMPT = 8
@@ -102,9 +103,9 @@ class QwenInsightTool(Tool):
                     value = json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")
-                raise RuntimeError(f"AdVista 分析服务 HTTP {exc.code}: {body[-4000:]}") from exc
+                raise ModelUnavailableError(f"AdVista 分析服务 HTTP {exc.code}: {body[-4000:]}") from exc
             except (urllib.error.URLError, TimeoutError) as exc:
-                raise RuntimeError(f"AdVista 分析服务请求失败: {exc}") from exc
+                raise ModelUnavailableError(f"AdVista 分析服务请求失败: {exc}") from exc
             try:
                 text = str(value["choices"][0]["message"]["content"])
                 raw_usage = value.get("usage") or {}
@@ -192,7 +193,7 @@ class QwenInsightTool(Tool):
         except ProcessCancelled as exc:
             raise RuntimeError("Qwen insight inference cancelled") from exc
         except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"Qwen insight inference timed out after {self.timeout_seconds}s") from exc
+            raise ModelTimeoutError(f"Qwen insight inference timed out after {self.timeout_seconds}s") from exc
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise RuntimeError("Qwen insight worker returned an invalid response") from exc
         finally:

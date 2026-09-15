@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableLambda
 
 from ad_vista_agent.agent.langgraph_backend import run_langgraph_agent
@@ -16,10 +16,15 @@ from ad_vista_agent.schemas import AgentRequest
 class ToolCallingFakeModel:
     def __init__(self, messages: list[AIMessage]) -> None:
         self.messages = iter(messages)
+        self.last_input: list[object] = []
 
     def bind_tools(self, tools, **kwargs):
         del tools, kwargs
-        return RunnableLambda(lambda messages: next(self.messages))
+        def invoke(messages):
+            self.last_input = messages
+            return next(self.messages)
+
+        return RunnableLambda(invoke)
 
 
 def test_langgraph_react_executes_required_tools_in_order(monkeypatch) -> None:
@@ -65,6 +70,10 @@ def test_langgraph_react_executes_required_tools_in_order(monkeypatch) -> None:
         )
         assert result["status"] == "completed"
         assert [item["tool"] for item in result["tool_calls"]] == ["ingest"]
+        assert isinstance(model.last_input[0], SystemMessage)
+        assert request.goal not in str(model.last_input[0].content)
+        assert isinstance(model.last_input[1], HumanMessage)
+        assert request.goal in str(model.last_input[1].content)
 
 
 def test_langgraph_rejects_out_of_order_tool(monkeypatch) -> None:

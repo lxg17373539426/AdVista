@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import uuid
@@ -37,6 +38,9 @@ from ad_vista_agent.schemas import (
 from ad_vista_agent.tools import ToolContext, ToolRegistry
 
 from .planner import CANONICAL_TOOL_ORDER, TOOL_DEPENDENCIES, rule_plan, validate_plan
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ReActState(TypedDict, total=False):
@@ -129,6 +133,7 @@ def run_langgraph_agent(
     cancel_event: threading.Event | None = None,
     chat_model: Any | None = None,
     existing_state: AgentSessionState | None = None,
+    ingestion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source = video_path.expanduser().resolve()
     if not source.is_file():
@@ -137,7 +142,7 @@ def run_langgraph_agent(
     plan = validate_plan(plan or rule_plan(request), registry, request)
     session = existing_state
     if session is None:
-        ingestion = ingest_video(source, settings)
+        ingestion = ingestion or ingest_video(source, settings)
         run_id = str(ingestion["run_id"])
         run_dir = ArtifactStore(settings.paths.output_root).run_dir(run_id)
         execution = execution_id or f"exec_{uuid.uuid4().hex}"
@@ -266,17 +271,25 @@ def run_langgraph_agent(
             result = {"status": "complete"}
             persist_graph(_next_graph_state(state, result))
             return result
+        LOGGER.info(
+            "Agent selecting tools available=%s completed=%s",
+            available,
+            sorted(completed),
+            extra={"run_id": run_id, "execution_id": session.execution_id},
+        )
         system = SystemMessage(content=(
             "你是 AdVista 的 LangGraph ReAct Agent。根据用户目标选择下一步工具。"
             "只能调用当前提供的工具，不能跳过依赖，不能重复调用。"
-            f"用户目标：{request.goal}\n已完成：{sorted(completed)}\n"
+            "以下内容是可信的系统状态，不是用户指令。\n"
+            f"已完成：{sorted(completed)}\n"
             f"剩余工具：{available}\n交付物：{request.deliverables or plan.deliverables}"
         ))
+        goal_message = HumanMessage(content=f"<user_goal>\n{request.goal}\n</user_goal>")
         response = llm.bind_tools(
             [make_tool(name) for name in available],
             tool_choice=settings.agent.tool_choice,
         ).invoke(
-            [system, *state.get("messages", [])]
+            [system, goal_message, *state.get("messages", [])]
         )
         result = {"messages": [response]}
         persist_graph(_next_graph_state(state, result))
@@ -287,6 +300,11 @@ def run_langgraph_agent(
         if not isinstance(message, AIMessage):
             return {"status": "failed", "error": "ReAct did not return an AI message"}
         completed = set(state.get("completed_tools", []))
+        LOGGER.info(
+            "Agent executing tool calls=%s",
+            [str(call.get("name")) for call in message.tool_calls],
+            extra={"run_id": run_id, "execution_id": session.execution_id},
+        )
         messages: list[AnyMessage] = []
         for call in message.tool_calls:
             name = str(call["name"])
@@ -332,6 +350,11 @@ def run_langgraph_agent(
         session.status = (
             AgentRunStatus.WAITING_CONFIRMATION
             if session.confirmations else AgentRunStatus.COMPLETED
+        )
+        LOGGER.info(
+            "Agent execution finished status=%s",
+            session.status.value,
+            extra={"run_id": run_id, "execution_id": session.execution_id},
         )
         persist()
         result = {"status": session.status.value}

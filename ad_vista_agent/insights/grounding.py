@@ -13,6 +13,7 @@ SUMMARY_ORDER = (
     MarketingDimension.CONVERSION_PATH,
 )
 INLINE_CITATION_PATTERN = re.compile(r"(?:speech_\d{4}|ocr_cluster_\d{4}|kf_[0-9a-z_]+)")
+OCR_REFERENCE_PATTERN = re.compile(r"ocr_(?:cluster_)?\d{4}$")
 
 
 def normalize_inline_citations(analysis: MarketingAnalysis) -> MarketingAnalysis:
@@ -32,6 +33,32 @@ def normalize_inline_citations(analysis: MarketingAnalysis) -> MarketingAnalysis
                 }
             )
         )
+    return analysis.model_copy(update={"insights": normalized})
+
+
+def normalize_ocr_cluster_references(
+    analysis: MarketingAnalysis,
+    evidence_to_cluster: dict[str, str],
+) -> MarketingAnalysis:
+    """Repair only exact OCR member-to-cluster reference mixups.
+
+    Models sometimes use an OCR evidence ID (``ocr_0024``) or derive a
+    cluster ID from that evidence number (``ocr_cluster_0024``). Both are
+    safe to repair only when the current Ledger explicitly maps the member
+    evidence to a cluster. Unknown IDs remain unchanged and are rejected by
+    the normal grounding validator.
+    """
+    normalized = []
+    for item in analysis.insights:
+        references = []
+        for reference in item.evidence_refs:
+            candidate = reference
+            if OCR_REFERENCE_PATTERN.fullmatch(reference):
+                evidence_id = reference.replace("ocr_cluster_", "ocr_", 1)
+                candidate = evidence_to_cluster.get(evidence_id, reference)
+            if candidate not in references:
+                references.append(candidate)
+        normalized.append(item.model_copy(update={"evidence_refs": references}))
     return analysis.model_copy(update={"insights": normalized})
 
 

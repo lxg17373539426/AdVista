@@ -17,8 +17,9 @@ Return structured insights for these dimensions when supported:
 
 Rules:
 1. Every insight must cite at least one supplied speech Evidence ID, OCR Cluster ID, or presented Keyframe ID.
-2. Never cite an ID that is not in the input.
-3. Prefer OCR Cluster IDs over duplicate member Evidence IDs.
+2. Never cite an ID that is not in the input. Copy citation IDs exactly; do not renumber them.
+3. For OCR, cite the `cluster_id` values from `ocr_clusters` and `citation_rules.allowed_ocr_cluster_ids`, such as `ocr_cluster_0016`. Do not construct a cluster ID from a member `evidence_id`; `ocr_0024` and `ocr_cluster_0024` are different IDs.
+4. Prefer OCR Cluster IDs over duplicate member Evidence IDs.
 4. Keep claims concise and avoid duplicate insights.
 5. Use epistemic_status observed only for directly visible facts, stated_by_ad for ad claims, and inferred_from_ad for audience or marketing interpretation.
 6. If evidence is insufficient, omit the insight and describe the gap in unknowns.
@@ -26,7 +27,6 @@ Rules:
 8. Write all user-facing text in Chinese, while preserving brand and product names as shown.
 9. Do not infer gender, age, income, occupation, geography, or other demographic attributes unless the Ledger directly supports them.
 10. Confidence must not exceed 0.85 for any insight.
-11. Put citation IDs only in evidence_refs. Do not write any Evidence or Cluster ID inside claim or reasoning_summary.
 12. Unknowns describe missing Ledger evidence, not proven absence from the original video. Each unknown must begin with “当前 Ledger 无证据表明”.
 13. Do not introduce mechanisms or terminology absent from the Ledger, such as “皮肤屏障”, unless directly cited evidence contains that concept.
 14. Use presented keyframes to identify visible products, demonstrations, packaging, scenes, and creative structure. Cite only the supplied kf_* IDs for visual claims, and do not infer details that are not directly visible.

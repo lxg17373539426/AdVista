@@ -13,6 +13,7 @@ from typing import Any, Callable, TypeVar
 from pydantic import BaseModel
 
 from ad_vista_agent.config import Settings
+from ad_vista_agent.errors import ModelUnavailableError, PlanError
 from ad_vista_agent.creative.builder import build_creative
 from ad_vista_agent.reports.builder import build_report
 from ad_vista_agent.reports.evidence import build_evidence_document
@@ -939,8 +940,9 @@ def _qwen_answer(
     user_text = (
         "EVIDENCE_CONTEXT\n"
         + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
-        + "\n\nQUESTION\n"
+        + "\n\n<user_question>\n"
         + question
+        + "\n</user_question>"
     )
     if include_images and run_dir is not None:
         messages.append({"role": "user", "content": [{"type": "text", "text": user_text}, *_image_content(run_dir, {**context, "visual_keyframes": image_frames or context.get("visual_keyframes", [])})]})
@@ -1021,9 +1023,9 @@ def _qwen_answer(
         return answer
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Chat service HTTP {exc.code}: {body[-4000:]}") from exc
+        raise ModelUnavailableError(f"Chat service HTTP {exc.code}: {body[-4000:]}") from exc
     except (KeyError, TypeError, ValueError, json.JSONDecodeError, urllib.error.URLError) as exc:
-        raise RuntimeError(f"Chat service returned an invalid answer: {exc}") from exc
+        raise PlanError(f"Chat service returned an invalid answer: {exc}") from exc
 
 
 def ask_agent(

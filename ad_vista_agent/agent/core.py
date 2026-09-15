@@ -323,7 +323,8 @@ def run_agent(
         source = video_path.expanduser().resolve()
         from ad_vista_agent.ingestion import ingest_video
 
-        run_id = str(ingest_video(source, settings)["run_id"])
+        ingestion = ingest_video(source, settings)
+        run_id = str(ingestion["run_id"])
         with store.lock(f"agent_{run_id}"):
             return run_langgraph_agent(
                 source,
@@ -334,6 +335,7 @@ def run_agent(
                 registry=registry,
                 execution_id=execution_id,
                 cancel_event=cancel_event,
+                ingestion=ingestion,
             )
     source = video_path.expanduser().resolve()
     if not source.is_file():

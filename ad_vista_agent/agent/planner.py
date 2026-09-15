@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ad_vista_agent.config import Settings
 from ad_vista_agent.schemas import AgentRequest, AnalysisPlan, PlanStep
 from ad_vista_agent.tools import ToolRegistry
+from ad_vista_agent.errors import ModelUnavailableError, PlanError
 
 
 TOOL_DEPENDENCIES: dict[str, set[str]] = {
@@ -270,7 +271,7 @@ def qwen_plan(request: AgentRequest, registry: ToolRegistry, settings: Settings)
             )
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Planner service HTTP {exc.code}: {body[-4000:]}") from exc
+        raise ModelUnavailableError(f"Planner service HTTP {exc.code}: {body[-4000:]}") from exc
     except (KeyError, TypeError, ValueError, json.JSONDecodeError, urllib.error.URLError) as exc:
-        raise RuntimeError(f"Planner returned an invalid plan: {exc}") from exc
+        raise PlanError(f"Planner returned an invalid plan: {exc}") from exc
     return validate_plan(compile_decision(decision, request), registry, request)

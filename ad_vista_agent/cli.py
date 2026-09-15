@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import shutil
 import subprocess
 import urllib.error
@@ -482,6 +484,10 @@ def serve(
     config: Annotated[Path, typer.Option("--config", "-c")] = DEFAULT_CONFIG,
 ) -> None:
     """Start the local Stage 12 Web workspace."""
+    logging.basicConfig(
+        level=os.getenv("ADVISTA_LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     from .web.app import serve as serve_web
 
     serve_web(load_settings(config))
