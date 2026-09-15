@@ -5,6 +5,8 @@ import mimetypes
 import os
 import re
 import secrets
+import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -139,6 +141,31 @@ class _Handler(BaseHTTPRequestHandler):
     service: WebService
     settings: Settings
     static_root = Path(__file__).parent / "static"
+    _rate_lock = threading.RLock()
+    _rate_windows: dict[str, list[float]] = {}
+
+    def _identity(self) -> dict[str, str] | None:
+        return getattr(self, "identity", None)
+
+    def _require_admin(self) -> bool:
+        identity = self._identity()
+        if identity is None:
+            supplied = self.headers.get("X-API-Key", "")
+            authorization = self.headers.get("Authorization", "")
+            if not supplied and authorization.startswith("Bearer "):
+                supplied = authorization[7:]
+            service = getattr(self, "service", None)
+            identity = service.authenticate_api_key(supplied) if service is not None else None
+            if identity is not None:
+                self.identity = identity
+        if identity is not None and identity.get("role") == "admin":
+            return True
+        self._error(403, "Administrator access required")
+        return False
+
+    def _idempotency_key(self) -> str | None:
+        value = self.headers.get("Idempotency-Key", "").strip()
+        return value or None
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -179,16 +206,38 @@ class _Handler(BaseHTTPRequestHandler):
             return True
         configured = self.settings.web.api_token
         local = self.settings.web.host in {"127.0.0.1", "localhost", "::1"}
-        if local and not configured:
-            return True
         supplied = self.headers.get("X-API-Key", "")
         authorization = self.headers.get("Authorization", "")
         if not supplied and authorization.startswith("Bearer "):
             supplied = authorization[7:]
-        if configured and secrets.compare_digest(supplied, configured):
-            return True
-        self._send_json({"error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
-        return False
+        service = getattr(self, "service", None)
+        identity = service.authenticate_api_key(supplied) if service is not None else None
+        if identity is not None:
+            self.identity = identity
+            subject = identity.get("user_id", "unknown")
+        elif configured and secrets.compare_digest(supplied, configured):
+            self.identity = {"user_id": "system", "username": "system", "role": "admin"}
+            subject = "system"
+        elif local and not configured and not supplied:
+            subject = "anonymous-local"
+        else:
+            self._send_json({"error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
+            return False
+        if not self._within_rate_limit(subject):
+            self._send_json({"error": "Rate limit exceeded"}, HTTPStatus.TOO_MANY_REQUESTS)
+            return False
+        return True
+
+    def _within_rate_limit(self, subject: str) -> bool:
+        now = time.monotonic()
+        cutoff = now - 60
+        with self._rate_lock:
+            values = [item for item in self._rate_windows.get(subject, []) if item > cutoff]
+            allowed = len(values) < self.settings.web.api_requests_per_minute
+            if allowed:
+                values.append(now)
+            self._rate_windows[subject] = values
+            return allowed
 
     def _stream_event(self, value: dict[str, object]) -> None:
         self.wfile.write((json.dumps(value, ensure_ascii=False) + "\n").encode("utf-8"))
@@ -217,19 +266,71 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             if not parts:
                 return self._send_file(self.static_root / "index.html", "text/html; charset=utf-8")
+            if parts == ["admin"] or parts == ["admin.html"]:
+                return self._send_file(self.static_root / "admin.html", "text/html; charset=utf-8")
             if parts == ["api", "health"]:
-                return self._send_json({"status": "ok", "service": "advista-agent-web"})
+                return self._send_json(
+                    {"service": "advista-agent-web", **self.service.health()}
+                )
             if parts == ["api", "runs"]:
-                return self._send_json({"runs": self.service.runs()})
+                identity = self._identity()
+                return self._send_json({"runs": self.service.runs(
+                    user_id=identity.get("user_id") if identity else None,
+                    is_admin=bool(identity and identity.get("role") == "admin"),
+                )})
             if parts == ["api", "chat", "messages"]:
                 session_id = query.get("session_id", [""])[0]
                 return self._send_json(self.service.general_messages(session_id))
+            if parts == ["api", "admin", "executions"]:
+                if not self._require_admin():
+                    return
+                status = query.get("status", [None])[0]
+                raw_limit = query.get("limit", ["100"])[0]
+                return self._send_json(
+                    {"executions": self.service.diagnostic_executions(
+                        status=status,
+                        limit=int(raw_limit),
+                    )}
+                )
+            if parts == ["api", "admin", "stats"]:
+                if not self._require_admin():
+                    return
+                return self._send_json(self.service.diagnostic_stats())
+            if parts == ["api", "admin", "executions", "export"]:
+                if not self._require_admin():
+                    return
+                status = query.get("status", [None])[0]
+                raw_limit = query.get("limit", ["500"])[0]
+                return self._send_json(
+                    {
+                        "status": "ok",
+                        "records": self.service.diagnostic_export(
+                            status=status,
+                            limit=int(raw_limit),
+                        ),
+                    }
+                )
+            if parts[:2] == ["api", "admin"] and len(parts) == 4 and parts[2] == "executions":
+                if not self._require_admin():
+                    return
+                return self._send_json(self.service.diagnostic_execution(parts[3]))
             if parts[0:2] == ["api", "jobs"] and len(parts) == 3:
-                return self._send_json(self.service.job(parts[2]))
+                identity = self._identity()
+                return self._send_json(self.service.job(
+                    parts[2],
+                    user_id=identity.get("user_id") if identity else None,
+                    is_admin=bool(identity and identity.get("role") == "admin"),
+                ))
             if len(parts) >= 3 and parts[0:2] == ["api", "runs"]:
                 run_id = parts[2]
                 if not _safe_run_id(run_id):
                     return self._error(400, "Invalid run ID")
+                identity = self._identity()
+                self.service.authorize_run(
+                    run_id,
+                    user_id=identity.get("user_id") if identity else None,
+                    is_admin=bool(identity and identity.get("role") == "admin"),
+                )
                 run = self.service.run(run_id)
                 run_dir = self.service.store.run_dir(str(run["asset_run_id"]))
                 artifact_root = self.service.artifact_root(run_id)
@@ -271,6 +372,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(404, "Not found")
         except (FileNotFoundError, KeyError):
             self._error(404, "Run or artifact not found")
+        except PermissionError as exc:
+            self._error(403, str(exc))
         except (ValueError, json.JSONDecodeError) as exc:
             self._error(400, str(exc))
         except Exception as exc:
@@ -314,6 +417,8 @@ class _Handler(BaseHTTPRequestHandler):
                     self.service.general_chat(
                         str(body.get("message", "")),
                         str(body["session_id"]) if body.get("session_id") else None,
+                        user_id=(self._identity() or {}).get("user_id"),
+                        idempotency_key=self._idempotency_key(),
                     )
                 )
             if parts == ["api", "chat", "stream"]:
@@ -328,6 +433,8 @@ class _Handler(BaseHTTPRequestHandler):
                         str(body.get("message", "")),
                         str(body["session_id"]) if body.get("session_id") else None,
                         on_delta=lambda value: self._stream_event({"type": "delta", "text": value}),
+                        user_id=(self._identity() or {}).get("user_id"),
+                        idempotency_key=self._idempotency_key(),
                     )
                 except Exception as exc:
                     self._stream_event(
@@ -345,6 +452,12 @@ class _Handler(BaseHTTPRequestHandler):
                 run_id = parts[2]
                 if not _safe_run_id(run_id):
                     return self._error(400, "Invalid run ID")
+                identity = self._identity()
+                self.service.authorize_run(
+                    run_id,
+                    user_id=identity.get("user_id") if identity else None,
+                    is_admin=bool(identity and identity.get("role") == "admin"),
+                )
                 body = _read_json(self)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
@@ -373,6 +486,7 @@ class _Handler(BaseHTTPRequestHandler):
                         "protocol_version": 1,
                         "session_id": result.get("session_id"),
                         "evidence_refs": result.get("evidence_refs", []),
+                        "context_version": result.get("context_version"),
                         "report_url": result.get("report_url"),
                         "report_label": result.get("report_label"),
                         "message": {
@@ -382,6 +496,7 @@ class _Handler(BaseHTTPRequestHandler):
                             "content": result.get("answer", ""),
                             "epistemic_status": result.get("epistemic_status"),
                             "unsupported_points": result.get("unsupported_points", []),
+                            "context_version": result.get("context_version"),
                             "citations": result.get("citations", []),
                         },
                     }
@@ -391,11 +506,23 @@ class _Handler(BaseHTTPRequestHandler):
                 run_id = parts[2]
                 if not _safe_run_id(run_id):
                     return self._error(400, "Invalid run ID")
+                identity = self._identity()
+                self.service.authorize_run(
+                    run_id,
+                    user_id=identity.get("user_id") if identity else None,
+                    is_admin=bool(identity and identity.get("role") == "admin"),
+                )
                 if parts[3] == "messages":
                     body = _read_json(self)
                     return self._send_json(self.service.chat(run_id, str(body.get("question", ""))))
                 if parts[3] == "feedback":
-                    return self._send_json(self.service.feedback(run_id, _read_json(self)))
+                    return self._send_json(
+                        self.service.feedback(
+                            run_id,
+                            _read_json(self),
+                            user_id=(self._identity() or {}).get("user_id"),
+                        )
+                    )
                 if parts[3] == "confirmation":
                     body = _read_json(self)
                     return self._send_json(
@@ -421,8 +548,15 @@ class _Handler(BaseHTTPRequestHandler):
             if not self._require_api_access(parts):
                 return
             if parts[0:2] == ["api", "jobs"] and len(parts) == 3:
-                return self._send_json(self.service.cancel_job(parts[2]))
+                identity = self._identity()
+                return self._send_json(self.service.cancel_job(
+                    parts[2],
+                    user_id=identity.get("user_id") if identity else None,
+                    is_admin=bool(identity and identity.get("role") == "admin"),
+                ))
             return self._error(404, "Not found")
+        except PermissionError as exc:
+            self._error(403, str(exc))
         except KeyError:
             self._error(404, "Job not found")
         except Exception as exc:
@@ -510,7 +644,14 @@ class _Handler(BaseHTTPRequestHandler):
             if unknown:
                 raise ValueError(f"Unknown deliverables: {', '.join(sorted(unknown))}")
             return self._send_json(
-                self.service.submit(target, goal, list(dict.fromkeys(deliverables)), mode=mode),
+                self.service.submit(
+                    target,
+                    goal,
+                    list(dict.fromkeys(deliverables)),
+                    mode=mode,
+                    user_id=(self._identity() or {}).get("user_id"),
+                    idempotency_key=self._idempotency_key(),
+                ),
                 HTTPStatus.ACCEPTED,
             )
         except Exception:

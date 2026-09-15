@@ -1,0 +1,6 @@
+# Replace the hostname before deployment. Caddy obtains and renews HTTPS
+# certificates automatically when DNS points to this server.
+advista.example.com {
+    encode gzip
+    reverse_proxy 127.0.0.1:8080
+}

@@ -118,7 +118,7 @@ def _make_state(
     return AgentSessionState(
         execution_id=execution_id,
         asset_id=asset_id,
-        session_id=f"conversation_{uuid.uuid4().hex}",
+        session_id=f"conversation_{execution_id}",
         run_id=run_id,
         source_path=source_path,
         request=request,

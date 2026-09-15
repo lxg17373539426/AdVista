@@ -44,16 +44,15 @@ asr:
 
 ocr:
   deepseek_python: .venv-ocr/bin/python
-  paddle_python: .venv-ocr/bin/python
   model: DeepSeek-OCR
   primary: deepseek_ocr
-  fallback: paddleocr
-  prompt: "<image>\n<|grounding|>Convert the image to markdown."
+  # Free OCR is more reliable for video frames; grounding mode often emits
+  # image placeholders or duplicated watermark text for this workload.
+  prompt: "<image>\nFree OCR."
   base_size: 1024
   image_size: 640
-  crop_mode: true
+  crop_mode: false
   timeout_seconds: 1800
-  paddle_score_threshold: 0.5
 
 ledger:
   ocr_similarity_threshold: 0.92
@@ -92,6 +91,8 @@ web:
   max_video_duration_seconds: 600
   max_video_pixels: 8294400
   max_active_jobs: 4
+  max_active_jobs_per_user: 2
+  api_requests_per_minute: 120
 
 agent:
   backend: langgraph

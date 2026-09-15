@@ -18,6 +18,9 @@ venv/
 !.env.example
 outputs/*
 !outputs/.gitkeep
+.postgresql/
+outputs/backups/
+tmp/
 models/
 data/
 artifacts/

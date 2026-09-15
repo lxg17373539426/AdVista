@@ -20,7 +20,7 @@ class OcrWorkerResult:
 
 class OcrWorkerTool(Tool):
     name = "ocr_worker"
-    description = "Execute an isolated DeepSeek-OCR or PaddleOCR worker."
+    description = "Execute an isolated DeepSeek-OCR worker."
 
     def __init__(self, python_executable: Path, timeout_seconds: int, cuda_visible_devices: str) -> None:
         self.python_executable = python_executable.expanduser().absolute()
@@ -29,12 +29,9 @@ class OcrWorkerTool(Tool):
 
     def run(self, context: ToolContext, arguments: dict[str, Any]) -> OcrWorkerResult:
         backend = str(arguments["backend"])
-        module = {
-            "deepseek_ocr": "ad_vista_agent.services.deepseek_ocr_worker",
-            "paddleocr": "ad_vista_agent.services.paddle_ocr_worker",
-        }.get(backend)
-        if module is None:
+        if backend != "deepseek_ocr":
             raise ValueError(f"Unknown OCR backend: {backend}")
+        module = "ad_vista_agent.services.deepseek_ocr_worker"
         if not self.python_executable.is_file():
             raise FileNotFoundError(self.python_executable)
         request_path = context.run_dir / "ocr" / f"{backend}_request.json"

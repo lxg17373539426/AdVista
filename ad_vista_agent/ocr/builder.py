@@ -11,7 +11,6 @@ from ad_vista_agent.runtime import ArtifactStore, sha256_file
 from ad_vista_agent.runtime.stage_cache import stage_cache_key
 from ad_vista_agent.schemas import (
     AdAsset,
-    BoundingBox,
     EpistemicStatus,
     Evidence,
     EvidenceModality,
@@ -20,9 +19,10 @@ from ad_vista_agent.schemas import (
     OcrRegion,
 )
 from ad_vista_agent.timeline.builder import build_timeline
-from ad_vista_agent.tools import OcrWorkerResult, OcrWorkerTool, ToolContext
+from ad_vista_agent.tools import OcrWorkerTool, ToolContext
 
 from .parse import ocr_quality_flags, parse_deepseek_grounding
+from .quality import build_ocr_quality_report
 
 
 DEEPSEEK_VERSIONS = {
@@ -30,8 +30,7 @@ DEEPSEEK_VERSIONS = {
     "transformers": "4.46.3",
     "flash_attn": "2.7.3",
 }
-PADDLE_VERSIONS = {"paddleocr": "3.7.0", "paddlepaddle": "3.3.1"}
-OCR_PIPELINE_VERSION = "1"
+OCR_PIPELINE_VERSION = "4"
 
 
 def _model_identity(model_path: Path) -> dict[str, object]:
@@ -98,13 +97,10 @@ def _cache_payload(asset: AdAsset, keyframes: list[Keyframe], settings: Settings
         "model": _model_identity(settings.model_path(settings.ocr.model)),
         "primary": settings.ocr.primary,
         "primary_versions": DEEPSEEK_VERSIONS,
-        "fallback": settings.ocr.fallback,
-        "fallback_versions": PADDLE_VERSIONS,
         "prompt": settings.ocr.prompt,
         "base_size": settings.ocr.base_size,
         "image_size": settings.ocr.image_size,
         "crop_mode": settings.ocr.crop_mode,
-        "paddle_score_threshold": settings.ocr.paddle_score_threshold,
     }
 
 
@@ -172,56 +168,6 @@ def _deepseek_results(
     return merged, versions, time.perf_counter() - started
 
 
-def _polygon_region(polygon: Any, width: int, height: int) -> BoundingBox | None:
-    try:
-        xs = [float(point[0]) for point in polygon]
-        ys = [float(point[1]) for point in polygon]
-        return BoundingBox(
-            x1=max(0, min(xs)) / width,
-            y1=max(0, min(ys)) / height,
-            x2=min(width, max(xs)) / width,
-            y2=min(height, max(ys)) / height,
-        )
-    except (TypeError, ValueError, IndexError):
-        return None
-
-
-def _paddle_results(
-    keyframes: list[Keyframe], run_dir: Path, settings: Settings
-) -> tuple[dict[str, list[OcrRegion]], dict[str, str], float]:
-    if not keyframes:
-        return {}, {}, 0.0
-    started = time.perf_counter()
-    tool = OcrWorkerTool(
-        settings.ocr.paddle_python,
-        settings.ocr.timeout_seconds,
-        settings.hardware.cuda_visible_devices,
-    )
-    result: OcrWorkerResult = tool.run(
-        ToolContext(run_id=run_dir.name, run_dir=run_dir),
-        {"backend": "paddleocr", "images": _image_items(keyframes, run_dir)},
-    )
-    if result.versions != PADDLE_VERSIONS:
-        raise RuntimeError(f"Unexpected PaddleOCR worker versions: {result.versions}")
-    by_id: dict[str, list[OcrRegion]] = {}
-    frames = {frame.keyframe_id: frame for frame in keyframes}
-    for item in result.items:
-        frame = frames[str(item["keyframe_id"])]
-        regions: list[OcrRegion] = []
-        for text, score, polygon in zip(
-            item.get("texts", []), item.get("scores", []), item.get("polygons", [])
-        ):
-            region = _polygon_region(polygon, frame.width, frame.height)
-            value = " ".join(str(text).split())
-            confidence = float(score)
-            if value and region is not None and confidence >= settings.ocr.paddle_score_threshold:
-                regions.append(
-                    OcrRegion(text=value, region=region, confidence=confidence, label="text")
-                )
-        by_id[frame.keyframe_id] = regions
-    return by_id, result.versions, time.perf_counter() - started
-
-
 def build_ocr(video_path: Path, settings: Settings, *, force: bool = False) -> dict[str, Any]:
     total_started = time.perf_counter()
     timeline_result = build_timeline(video_path, settings)
@@ -254,31 +200,18 @@ def build_ocr(video_path: Path, settings: Settings, *, force: bool = False) -> d
                 "cache_key": cache_key,
             }
 
-    deepseek_error = None
-    try:
-        deepseek, deepseek_versions, deepseek_seconds = _deepseek_results(keyframes, run_dir, settings)
-    except Exception as exc:
-        deepseek = {}
-        deepseek_versions = {}
-        deepseek_seconds = 0.0
-        deepseek_error = str(exc)
+    deepseek, deepseek_versions, deepseek_seconds = _deepseek_results(keyframes, run_dir, settings)
 
-    missing = [frame for frame in keyframes if not deepseek.get(frame.keyframe_id, ("", []))[1]]
-    paddle, paddle_versions, paddle_seconds = _paddle_results(missing, run_dir, settings)
     frame_results: list[OcrFrameResult] = []
     for frame in keyframes:
         raw, regions = deepseek.get(frame.keyframe_id, ("", []))
-        backend = "deepseek_ocr"
-        if not regions:
-            regions = paddle.get(frame.keyframe_id, [])
-            backend = "paddleocr" if frame.keyframe_id in paddle else "deepseek_ocr"
         frame_results.append(
             OcrFrameResult(
                 keyframe_id=frame.keyframe_id,
                 shot_id=frame.shot_id,
                 timestamp_ms=frame.timestamp_ms,
                 frame_path=str(frame.artifact_path),
-                backend=backend,
+                backend="deepseek_ocr",
                 raw_text=raw,
                 regions=regions,
             )
@@ -301,11 +234,7 @@ def build_ocr(video_path: Path, settings: Settings, *, force: bool = False) -> d
                     confidence=region.confidence,
                     epistemic_status=EpistemicStatus.OBSERVED,
                     tool=frame.backend,
-                    model_version=(
-                        "DeepSeek-OCR"
-                        if frame.backend == "deepseek_ocr"
-                        else "PP-OCRv6"
-                    ),
+                    model_version="DeepSeek-OCR",
                     artifact_path=Path(frame.frame_path),
                     artifact_hash=next(
                         item.artifact_sha256
@@ -318,16 +247,15 @@ def build_ocr(video_path: Path, settings: Settings, *, force: bool = False) -> d
                         "shot_id": frame.shot_id,
                         "label": region.label,
                         "quality_flags": ocr_quality_flags(region.text),
-                        "backend_versions": (
-                            DEEPSEEK_VERSIONS
-                            if frame.backend == "deepseek_ocr"
-                            else PADDLE_VERSIONS
-                        ),
+                        "backend_versions": DEEPSEEK_VERSIONS,
                     },
                 )
             )
     store.write_jsonl(evidence_path, evidence)
     _validate_evidence(evidence, keyframes)
+    quality = build_ocr_quality_report(frame_results)
+    quality_path = ocr_dir / "quality.json"
+    store.write_json(quality_path, quality)
     total_seconds = time.perf_counter() - total_started
     metrics = {
         "schema_version": settings.project.schema_version,
@@ -337,14 +265,12 @@ def build_ocr(video_path: Path, settings: Settings, *, force: bool = False) -> d
         "cache_hit": False,
         "keyframe_count": len(keyframes),
         "deepseek_frame_count": sum(item.backend == "deepseek_ocr" for item in frame_results),
-        "paddle_frame_count": sum(item.backend == "paddleocr" for item in frame_results),
         "evidence_count": len(evidence),
         "deepseek_seconds": round(deepseek_seconds, 6),
-        "paddle_seconds": round(paddle_seconds, 6),
         "total_seconds": round(total_seconds, 6),
         "deepseek_versions": deepseek_versions,
-        "paddle_versions": paddle_versions,
-        "deepseek_error": deepseek_error,
+        "quality_status": quality["status"],
+        "quality_score": quality["score"],
     }
     store.write_json(metrics_path, metrics)
     manifest = store.read_json(manifest_path)
@@ -355,6 +281,7 @@ def build_ocr(video_path: Path, settings: Settings, *, force: bool = False) -> d
         "artifacts": {
             "raw": "ocr/raw.jsonl",
             "evidence": "ocr/evidence.jsonl",
+            "quality": "ocr/quality.json",
             "metrics": "stage_4_metrics.json",
         },
     }
@@ -366,6 +293,7 @@ def build_ocr(video_path: Path, settings: Settings, *, force: bool = False) -> d
         "run_dir": str(run_dir),
         "frame_count": len(frame_results),
         "evidence_count": len(evidence),
+        "quality": quality,
         "cache_key": cache_key,
         "metrics": metrics,
     }

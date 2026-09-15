@@ -30,6 +30,7 @@ from .insights.builder import _model_identity, build_insights
 from .ledger.builder import build_ledger
 from .maintenance import apply_cleanup, cleanup_candidates
 from .ocr.builder import build_ocr
+from .ocr.quality import build_ocr_quality_report
 from .reports.builder import build_report
 from .schemas import AgentRequest
 from .timeline.builder import build_timeline
@@ -56,7 +57,6 @@ def doctor(
     settings = load_settings(config)
     asr_python = settings.asr.python_executable.expanduser().absolute()
     deepseek_python = settings.ocr.deepseek_python.expanduser().absolute()
-    paddle_python = settings.ocr.paddle_python.expanduser().absolute()
     insight_python = settings.insight.python_executable.expanduser().absolute()
     ffprobe = shutil.which(settings.tools.ffprobe_executable)
     model_checks = {
@@ -76,7 +76,6 @@ def doctor(
         "ffprobe": ffprobe,
         "asr_python": str(asr_python) if asr_python.is_file() else None,
         "deepseek_ocr_python": str(deepseek_python) if deepseek_python.is_file() else None,
-        "paddle_ocr_python": str(paddle_python) if paddle_python.is_file() else None,
         "insight_python": str(insight_python) if insight_python.is_file() else None,
         "gpu_limit": settings.hardware.max_gpus,
         "cuda_visible_devices": settings.hardware.cuda_visible_devices,
@@ -135,7 +134,6 @@ def doctor(
         bool(ffprobe),
         asr_python.is_file(),
         deepseek_python.is_file(),
-        paddle_python.is_file(),
         insight_python.is_file(),
         qwen_identity is not None,
     ]
@@ -218,6 +216,29 @@ def ocr(
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
     _print(result)
+
+
+@app.command("ocr-quality")
+def ocr_quality(
+    raw: Annotated[Path, typer.Argument(help="Path to OCR raw.jsonl")],
+    strict: Annotated[bool, typer.Option("--strict", help="Exit with code 1 when review is required")] = False,
+) -> None:
+    """Audit DeepSeek-OCR output for empty frames, noise, and repetition."""
+    from .schemas import OcrFrameResult
+
+    try:
+        frames = [
+            OcrFrameResult.model_validate(json.loads(line))
+            for line in raw.expanduser().resolve().read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        typer.echo(f"Error: invalid OCR result file: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    result = build_ocr_quality_report(frames)
+    _print(result)
+    if strict and result["status"] != "pass":
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -464,6 +485,262 @@ def serve(
     from .web.app import serve as serve_web
 
     serve_web(load_settings(config))
+
+
+@app.command("database-check")
+def database_check(
+    config: Annotated[Path, typer.Option("--config", "-c")] = DEFAULT_CONFIG,
+) -> None:
+    """Check the configured external service database connection."""
+    database = None
+    try:
+        settings = load_settings(config)
+        if not settings.database.configured:
+            raise ValueError("ADVISTA_DATABASE_URL is not configured")
+        from .database import Database
+
+        database = Database(settings.database)
+        database.check()
+    except Exception as exc:
+        typer.echo(f"Error: database connection failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        if database is not None:
+            database.close()
+    _print({"status": "ok", "database": "reachable"})
+
+
+@app.command("user-create")
+def user_create(
+    username: Annotated[str, typer.Argument(help="External user name")],
+    role: Annotated[str, typer.Option("--role", help="user or admin")] = "user",
+    config: Annotated[Path, typer.Option("--config", "-c")] = DEFAULT_CONFIG,
+) -> None:
+    """Create a database API user and print its one-time API key."""
+    if role not in {"user", "admin"}:
+        raise typer.BadParameter("role must be user or admin")
+    database = None
+    try:
+        settings = load_settings(config)
+        if not settings.database.configured:
+            raise ValueError("ADVISTA_DATABASE_URL is not configured")
+        from .database import Database, UserRepository
+
+        database = Database(settings.database)
+        database.check()
+        user, api_key = UserRepository(database).create_api_user(username, role=role)
+    except Exception as exc:
+        typer.echo(f"Error: user creation failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        if database is not None:
+            database.close()
+    _print({"status": "ok", "user_id": user.user_id, "username": user.username, "role": user.role, "api_key": api_key})
+
+
+@app.command("migrate-conversations")
+def migrate_conversations(
+    sqlite_path: Annotated[Path | None, typer.Option("--sqlite-path")] = None,
+    config: Annotated[Path, typer.Option("--config", "-c")] = DEFAULT_CONFIG,
+) -> None:
+    """Copy existing SQLite conversations into the configured PostgreSQL database."""
+    database = None
+    try:
+        settings = load_settings(config)
+        if not settings.database.configured:
+            raise ValueError("ADVISTA_DATABASE_URL is not configured")
+        from .agent.chat import conversation_db
+        from .database import Database, migrate_sqlite_conversations
+
+        database = Database(settings.database)
+        database.check()
+        result = migrate_sqlite_conversations(
+            (sqlite_path or conversation_db(settings)).expanduser().resolve(), database
+        )
+    except Exception as exc:
+        typer.echo(f"Error: conversation migration failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        if database is not None:
+            database.close()
+    _print({"status": "ok", **result})
+
+
+@app.command("migrate-jobs")
+def migrate_jobs(
+    job_root: Annotated[Path | None, typer.Option("--job-root")] = None,
+    config: Annotated[Path, typer.Option("--config", "-c")] = DEFAULT_CONFIG,
+) -> None:
+    """Backfill legacy Web Job JSON files into database execution records."""
+    database = None
+    try:
+        settings = load_settings(config)
+        if not settings.database.configured:
+            raise ValueError("ADVISTA_DATABASE_URL is not configured")
+        from .database import Database, migrate_json_jobs
+
+        database = Database(settings.database)
+        database.check()
+        result = migrate_json_jobs(
+            (job_root or settings.paths.output_root / "jobs").expanduser().resolve(),
+            database,
+        )
+    except Exception as exc:
+        typer.echo(f"Error: job migration failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        if database is not None:
+            database.close()
+    _print({"status": "ok", **result})
+
+
+@app.command("migrate-contexts")
+def migrate_contexts(
+    job_root: Annotated[Path | None, typer.Option("--job-root")] = None,
+    config: Annotated[Path, typer.Option("--config", "-c")] = DEFAULT_CONFIG,
+) -> None:
+    """Backfill context versions from existing Jobs and their artifacts."""
+    database = None
+    try:
+        settings = load_settings(config)
+        if not settings.database.configured:
+            raise ValueError("ADVISTA_DATABASE_URL is not configured")
+        from .database import Database, migrate_json_contexts
+
+        database = Database(settings.database)
+        database.check()
+        result = migrate_json_contexts(
+            (job_root or settings.paths.output_root / "jobs").expanduser().resolve(),
+            settings.paths.output_root,
+            database,
+        )
+    except Exception as exc:
+        typer.echo(f"Error: context migration failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        if database is not None:
+            database.close()
+    _print({"status": "ok", **result})
+
+
+@app.command("repair-messages")
+def repair_messages(
+    config: Annotated[Path, typer.Option("--config", "-c")] = DEFAULT_CONFIG,
+) -> None:
+    """Complete orphaned pending user messages left by terminal requests."""
+    database = None
+    try:
+        settings = load_settings(config)
+        if not settings.database.configured:
+            raise ValueError("ADVISTA_DATABASE_URL is not configured")
+        from .database import Database, RequestRepository
+
+        database = Database(settings.database)
+        database.check()
+        result = RequestRepository(database).repair_pending_user_messages()
+    except Exception as exc:
+        typer.echo(f"Error: message repair failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        if database is not None:
+            database.close()
+    _print({"status": "ok", **result})
+
+
+@app.command("quality-report")
+def quality_report(
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+    config: Annotated[Path, typer.Option("--config", "-c")] = DEFAULT_CONFIG,
+) -> None:
+    """Write a redacted execution quality report suitable for cron jobs."""
+    database = None
+    try:
+        from datetime import datetime, timezone
+        from .database import Database, DiagnosticRepository
+        from .runtime import ArtifactStore
+
+        settings = load_settings(config)
+        if not settings.database.configured:
+            raise ValueError("ADVISTA_DATABASE_URL is not configured")
+        database = Database(settings.database)
+        database.check()
+        diagnostics = DiagnosticRepository(database)
+        generated_at = datetime.now(timezone.utc).isoformat()
+        payload = {
+            "schema_version": "1",
+            "generated_at": generated_at,
+            "stats": diagnostics.stats(),
+            "recent_failures": diagnostics.export_executions(status="failed", limit=100),
+        }
+        target = (
+            output.expanduser().resolve()
+            if output is not None
+            else settings.paths.output_root / "diagnostics" / "quality-report.json"
+        )
+        ArtifactStore(settings.paths.output_root).write_json(target, payload)
+    except Exception as exc:
+        typer.echo(f"Error: quality report failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        if database is not None:
+            database.close()
+    _print({"status": "ok", "report": str(target), "generated_at": generated_at})
+
+
+@app.command("user-delete")
+def user_delete(
+    user_id: Annotated[str, typer.Argument(help="Database user ID")],
+    apply: Annotated[bool, typer.Option("--apply", help="Actually delete database records")] = False,
+    config: Annotated[Path, typer.Option("--config", "-c")] = DEFAULT_CONFIG,
+) -> None:
+    """Preview or permanently delete a user's database records."""
+    database = None
+    try:
+        settings = load_settings(config)
+        if not settings.database.configured:
+            raise ValueError("ADVISTA_DATABASE_URL is not configured")
+        from .database import Database, DiagnosticRepository, UserRepository
+
+        database = Database(settings.database)
+        database.check()
+        executions = DiagnosticRepository(database).executions(user_id=user_id, limit=500)
+        if not apply:
+            _print({"status": "preview", "user_id": user_id, "execution_count": len(executions)})
+            return
+        deleted = UserRepository(database).delete_user(user_id)
+    except Exception as exc:
+        typer.echo(f"Error: user deletion failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        if database is not None:
+            database.close()
+    _print({"status": "ok", "user_id": user_id, **deleted})
+
+
+@app.command("user-status")
+def user_status(
+    user_id: Annotated[str, typer.Argument(help="Database user ID")],
+    status: Annotated[str, typer.Argument(help="active, revoked, or disabled")],
+    config: Annotated[Path, typer.Option("--config", "-c")] = DEFAULT_CONFIG,
+) -> None:
+    """Activate, revoke, or disable a database API user."""
+    database = None
+    try:
+        settings = load_settings(config)
+        if not settings.database.configured:
+            raise ValueError("ADVISTA_DATABASE_URL is not configured")
+        from .database import Database, UserRepository
+
+        database = Database(settings.database)
+        database.check()
+        UserRepository(database).set_status(user_id, status)
+    except Exception as exc:
+        typer.echo(f"Error: user status update failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        if database is not None:
+            database.close()
+    _print({"status": "ok", "user_id": user_id, "user_status": status})
 
 
 @app.command("session-show")

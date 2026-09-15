@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -86,16 +87,13 @@ class OcrConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     deepseek_python: Path
-    paddle_python: Path
     model: str
     primary: str = Field(default="deepseek_ocr", pattern=r"^deepseek_ocr$")
-    fallback: str = Field(default="paddleocr", pattern=r"^paddleocr$")
     prompt: str
     base_size: int = Field(default=1024, gt=0)
     image_size: int = Field(default=640, gt=0)
     crop_mode: bool = True
     timeout_seconds: int = Field(default=1800, ge=1)
-    paddle_score_threshold: float = Field(default=0.5, ge=0, le=1)
 
 
 class LedgerConfig(BaseModel):
@@ -146,6 +144,8 @@ class WebConfig(BaseModel):
     max_video_duration_seconds: int = Field(default=600, ge=1)
     max_video_pixels: int = Field(default=8_294_400, ge=1)
     max_active_jobs: int = Field(default=4, ge=1)
+    max_active_jobs_per_user: int = Field(default=2, ge=1)
+    api_requests_per_minute: int = Field(default=120, ge=1)
 
     @model_validator(mode="after")
     def require_token_for_remote_host(self) -> "WebConfig":
@@ -160,6 +160,19 @@ class AgentConfig(BaseModel):
     backend: str = Field(default="langgraph", pattern=r"^(legacy|langgraph)$")
     recursion_limit: int = Field(default=32, ge=4, le=100)
     tool_choice: str = Field(default="required", pattern=r"^(auto|required)$")
+
+
+class DatabaseConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: SecretStr | None = None
+    pool_size: int = Field(default=10, ge=1, le=100)
+    max_overflow: int = Field(default=20, ge=0, le=200)
+    pool_timeout_seconds: int = Field(default=30, ge=1, le=300)
+
+    @property
+    def configured(self) -> bool:
+        return self.url is not None
 
 
 class Settings(BaseModel):
@@ -178,6 +191,7 @@ class Settings(BaseModel):
     report: ReportConfig
     web: WebConfig = WebConfig()
     agent: AgentConfig = AgentConfig()
+    database: DatabaseConfig = DatabaseConfig()
 
     def model_path(self, model_name: str) -> Path:
         return self.paths.model_root / model_name
@@ -188,4 +202,10 @@ def load_settings(config_path: Path = DEFAULT_CONFIG) -> Settings:
         value = yaml.safe_load(handle)
     if not isinstance(value, dict):
         raise ValueError(f"Configuration must be a YAML object: {config_path}")
+    database_url = os.environ.get("ADVISTA_DATABASE_URL")
+    if database_url:
+        database = value.get("database")
+        if database is not None and not isinstance(database, dict):
+            raise ValueError("Configuration database section must be a YAML object")
+        value["database"] = {**(database or {}), "url": database_url}
     return Settings.model_validate(value)

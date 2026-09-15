@@ -1044,6 +1044,7 @@ def ask_agent(
         else run_dir
     )
     context, allowed_refs = _context(run_dir, artifact_root)
+    context_version = _latest_context_version(settings, state)
     conversations = ConversationStore(conversation_db(settings))
     conversations.create_session(
         session_id=state.session_id,
@@ -1219,11 +1220,47 @@ def ask_agent(
         answer.answer,
         answer.evidence_refs,
     )
+    answer_payload = answer.model_dump(mode="json")
+    if context_version is not None:
+        answer_payload["context_version"] = context_version
     version_id = conversations.add_version(
         state.session_id,
         assistant_message_id,
-        answer.model_dump(mode="json"),
+        answer_payload,
     )
+    if settings.database.configured and state.execution_id:
+        database = None
+        try:
+            from ad_vista_agent.database import (
+                Database,
+                ExecutionRepository,
+                PostgresConversationStore,
+                RequestRepository,
+            )
+
+            database = Database(settings.database)
+            execution_repository = ExecutionRepository(database)
+            request_context = execution_repository.request_context(state.execution_id)
+            if request_context is not None:
+                request_id, user_id = request_context
+                postgres_conversations = PostgresConversationStore(database, user_id=user_id)
+                postgres_message_id = postgres_conversations.add_message(
+                    state.session_id,
+                    "assistant",
+                    answer.answer,
+                    answer.evidence_refs,
+                    context_version=context_version,
+                )
+                postgres_conversations.add_version(
+                    state.session_id,
+                    postgres_message_id,
+                    answer_payload,
+                    context_version=context_version,
+                )
+                RequestRepository(database).complete_user_message(request_id)
+        finally:
+            if database is not None:
+                database.close()
     if on_delta is not None:
         for offset in range(0, len(answer.answer), 120):
             on_delta(answer.answer[offset : offset + 120])
@@ -1235,11 +1272,30 @@ def ask_agent(
         "user_message_id": user_message_id,
         "assistant_message_id": assistant_message_id,
         "version_id": version_id,
+        "context_version": context_version,
         **answer.model_dump(mode="json"),
         "citations": citations,
         "report_url": report_url,
         "report_label": "查看营销方案" if report_url and "marketing-html" in report_url else None,
     }
+
+
+def _latest_context_version(settings: Settings, state: AgentSessionState) -> int | None:
+    execution_id = state.execution_id
+    if not settings.database.configured or not execution_id:
+        return None
+    database = None
+    try:
+        from ad_vista_agent.database import ContextRepository, Database
+
+        database = Database(settings.database)
+        value = ContextRepository(database).latest(f"conversation_{execution_id}")
+        return value.version if value is not None else None
+    except (KeyError, OSError, RuntimeError):
+        return None
+    finally:
+        if database is not None:
+            database.close()
 
 
 def show_conversation(run_id: str, settings: Settings) -> dict[str, Any]:

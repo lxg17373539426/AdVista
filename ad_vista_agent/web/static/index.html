@@ -17,6 +17,14 @@
       <div class="brand"><span>A</span><strong>AdVista</strong></div>
       <button id="new-chat" class="new-chat">＋ 新对话</button>
       <div class="history-title"><span>视频任务</span><span id="run-count">0</span></div>
+      <div class="history-tools">
+        <input id="run-search" class="run-search" type="search" placeholder="搜索视频或目标" aria-label="搜索视频任务">
+        <div class="run-filters" role="group" aria-label="筛选视频任务">
+          <button type="button" class="run-filter selected" data-filter="all">全部</button>
+          <button type="button" class="run-filter" data-filter="failed">失败</button>
+          <button type="button" class="run-filter" data-filter="report">有报告</button>
+        </div>
+      </div>
       <div id="runs" class="run-list"></div>
       <div class="connection"><i></i><span id="health">连接中</span></div>
     </aside>
@@ -29,7 +37,6 @@
       </header>
 
        <section id="conversation" class="conversation">
-         <div id="context-bar" class="context-bar hidden"></div>
          <div id="context-bar" class="context-bar hidden"></div>
          <div id="welcome" class="welcome">
           <div class="welcome-mark">✦</div>

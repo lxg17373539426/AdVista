@@ -147,7 +147,7 @@ def run_langgraph_agent(
         session = AgentSessionState(
             execution_id=execution,
             asset_id=asset_id,
-            session_id=f"conversation_{uuid.uuid4().hex}",
+            session_id=f"conversation_{execution}",
             run_id=run_id,
             source_path=source,
             request=request,
