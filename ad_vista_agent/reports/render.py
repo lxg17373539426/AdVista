@@ -13,7 +13,7 @@ from ad_vista_agent.schemas import (
     MarketingDimension,
     ReportEvidence,
 )
-from ad_vista_agent.skills import REPORT_FRONTEND_SKILL
+from ad_vista_agent.skills import REPORT_FRONTEND_SKILL, report_frontend_contract
 
 
 DIMENSION_LABELS = {
@@ -55,6 +55,7 @@ def render_markdown_report(
     *,
     source_name: str | None = None,
 ) -> str:
+    frontend_contract = report_frontend_contract()
     audits = _audit_by_id(audit)
     grouped: dict[MarketingDimension, list[GroundedMarketingInsight]] = defaultdict(list)
     for insight in analysis.insights:
@@ -170,6 +171,7 @@ def render_html_report(
     max_evidence_per_insight: int,
     source_name: str | None = None,
 ) -> str:
+    frontend_contract = report_frontend_contract()
     audits = _audit_by_id(audit)
     grouped: dict[MarketingDimension, list[GroundedMarketingInsight]] = defaultdict(list)
     for insight in analysis.insights:
@@ -241,11 +243,13 @@ def render_html_report(
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="generator" content="AdVista {REPORT_FRONTEND_SKILL}">
+<meta name="ad-vista-frontend-contract" content="deterministic-renderer-v1">
+<meta name="ad-vista-frontend-rules" content="{html.escape(frontend_contract.splitlines()[0])}">
 <title>{html.escape(report_name)} 广告分析报告</title>
 <style>
-:root{{--ink:#202124;--deep:#ffffff;--paper:#ffffff;--paper-light:#ffffff;--line:#e8e8e8;--muted:#777b80;--orange:#d97745;--amber:#a77928;--red:#bd6258;--green:#408264;--soft:#f7f7f5}}
+:root{{--ink:#20312d;--deep:#163c35;--paper:#f3eee4;--paper-light:#fffdf8;--line:#d9d1c4;--muted:#68756f;--orange:#c8653f;--amber:#9a7027;--red:#a94d48;--green:#2e735b;--soft:#e7e1d6}}
 *{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:var(--paper);color:var(--ink);font:15px/1.65 system-ui,-apple-system,"Noto Sans SC","Microsoft YaHei",sans-serif}}a{{color:inherit}}
-.layout{{display:grid;grid-template-columns:212px minmax(0,1fr);min-height:100vh}}.rail{{position:sticky;top:0;height:100vh;padding:28px 20px;background:var(--soft);border-right:1px solid var(--line);color:var(--ink);display:flex;flex-direction:column}}.brand{{font:750 14px/1.2 ui-monospace,monospace;letter-spacing:.08em}}.brand small{{display:block;margin-top:8px;color:var(--muted);font:12px/1.4 inherit;letter-spacing:0}}.rail-title{{margin:48px 0 12px;color:var(--muted);font-size:10px;font-weight:750;letter-spacing:.16em}}nav{{display:grid;gap:3px}}nav a{{display:flex;align-items:center;gap:9px;padding:8px 5px;color:#5f6368;text-decoration:none;font-size:13px;border-left:2px solid transparent}}nav a:hover{{color:var(--ink);border-left-color:var(--orange);background:#fff}}nav em{{margin-left:auto;color:#a3a5a8;font-style:normal;font-size:11px}}.nav-dot{{width:6px;height:6px;border-radius:50%;background:#c6c8c9}}.rail-foot{{margin-top:auto;color:var(--muted);font-size:11px;line-height:1.6}}
+.layout{{display:grid;grid-template-columns:238px minmax(0,1fr);min-height:100vh}}.rail{{position:sticky;top:0;height:100vh;padding:30px 22px;background:var(--deep);border-right:1px solid #0d2e29;color:#f4f0e7;display:flex;flex-direction:column}}.brand{{font:750 14px/1.2 ui-monospace,monospace;letter-spacing:.08em}}.brand small{{display:block;margin-top:8px;color:#a8bbb4;font:12px/1.4 inherit;letter-spacing:0}}.rail-title{{margin:48px 0 12px;color:#89a39a;font-size:10px;font-weight:750;letter-spacing:.16em}}nav{{display:grid;gap:3px}}nav a{{display:flex;align-items:center;gap:9px;padding:9px 7px;color:#c5d2cd;text-decoration:none;font-size:13px;border-left:2px solid transparent}}nav a:hover{{color:#fff;border-left-color:var(--orange);background:#214b43}}nav em{{margin-left:auto;color:#89a39a;font-style:normal;font-size:11px}}.nav-dot{{width:6px;height:6px;border-radius:50%;background:#709087}}.rail-foot{{margin-top:auto;color:#89a39a;font-size:11px;line-height:1.6}}
 main{{min-width:0;max-width:1180px;width:100%;padding:48px 6vw 82px}}header{{position:relative;padding:22px 0 36px;border-bottom:1px solid var(--line)}}.kicker{{margin:0 0 17px;color:var(--orange);font:750 10px/1 ui-monospace,monospace;letter-spacing:.17em}}h1{{max-width:820px;margin:0 0 16px;font-size:44px;line-height:1.15;font-weight:720;letter-spacing:0}}.summary{{max-width:760px;margin:0;color:#5f6368;font-size:16px}}.header-row{{display:flex;align-items:end;justify-content:space-between;gap:24px;margin-top:28px}}.status{{display:inline-flex;align-items:center;gap:7px;padding:5px 9px;border:1px solid currentColor;border-radius:3px;font-size:12px;font-weight:700;white-space:nowrap}}.status::before{{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}}.status.pass{{color:var(--green);background:#fff}}.status.review{{color:var(--amber);background:#fff}}.status.fail{{color:var(--red);background:#fff}}
 .scoreboard{{display:grid;grid-template-columns:repeat(4,minmax(86px,1fr));gap:0;max-width:610px;border:1px solid var(--line)}}.score{{padding:12px 15px;background:#fff;border-right:1px solid var(--line)}}.score:last-child{{border-right:0}}.score strong{{display:block;font-size:22px;line-height:1.15}}.score span{{display:block;margin-top:4px;color:var(--muted);font-size:11px}}
 .dimension{{padding-top:54px;scroll-margin-top:18px}}.section-heading{{display:flex;align-items:baseline;gap:12px;margin-bottom:16px}}h2{{margin:0;font-size:21px;line-height:1.2}}.section-index{{color:var(--orange);font:750 12px ui-monospace,monospace}}.section-count{{margin-left:auto;color:var(--muted);font-size:12px}}

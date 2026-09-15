@@ -56,6 +56,7 @@ def _observation(output: dict[str, Any]) -> dict[str, object]:
         "script",
         "storyboard",
         "ab_plan",
+        "strategy",
     )
     return {key: output[key] for key in keys if key in output}
 
@@ -133,6 +134,7 @@ def _deliver(state: AgentSessionState) -> None:
     observations = state.observations
     requested = set(state.plan.deliverables)
     report = next((item for item in reversed(observations) if "html" in item), None)
+    strategy = next((item for item in reversed(observations) if "strategy" in item), None)
     insights = next(
         (
             item
@@ -143,13 +145,9 @@ def _deliver(state: AgentSessionState) -> None:
     )
     if report and "report" in requested:
         state.deliverables["report"] = report
-    if report and "risk_audit" in requested:
-        state.deliverables["risk_audit"] = report
-    if insights and "insights" in requested:
-        state.deliverables["insights"] = insights
+    if strategy and "strategy" in requested:
+        state.deliverables["strategy"] = strategy
     evidence = next((item for item in reversed(observations) if "evidence_count" in item), None)
-    if evidence and "evidence" in requested:
-        state.deliverables["evidence"] = evidence
     creative = next((item for item in reversed(observations) if "package" in item), None)
     if creative and "creative" in requested:
         state.deliverables["creative"] = creative

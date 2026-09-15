@@ -350,7 +350,7 @@ def agent_plan(
     mode: Annotated[str, typer.Option("--mode", help="quick or deep")] = "quick",
     deliverable: Annotated[
         list[str] | None,
-        typer.Option("--deliverable", help="evidence, insights, risk_audit, report, or creative"),
+        typer.Option("--deliverable", help="report, strategy, or creative"),
     ] = None,
     max_tool_calls: Annotated[int, typer.Option("--max-tool-calls")] = 12,
     qwen: Annotated[bool, typer.Option("--qwen", help="Use Qwen instead of the deterministic planner")] = False,
@@ -380,7 +380,7 @@ def agent_run(
     mode: Annotated[str, typer.Option("--mode", help="quick or deep")] = "quick",
     deliverable: Annotated[
         list[str] | None,
-        typer.Option("--deliverable", help="evidence, insights, risk_audit, report, or creative"),
+        typer.Option("--deliverable", help="report, strategy, or creative"),
     ] = None,
     max_tool_calls: Annotated[int, typer.Option("--max-tool-calls")] = 12,
     qwen_planner: Annotated[

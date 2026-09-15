@@ -40,13 +40,13 @@ def test_model_internal_references_expand_to_real_evidence_ids() -> None:
 
 def test_rule_plan_preserves_multiple_requested_deliverables() -> None:
     request = AgentRequest(
-        goal="生成证据、报告和创意方案",
-        deliverables=["evidence", "report", "creative"],
+        goal="生成报告、策略和创意方案",
+        deliverables=["report", "strategy", "creative"],
     )
 
     plan = rule_plan(request)
 
-    assert plan.deliverables == ["evidence", "report", "creative"]
+    assert plan.deliverables == ["report", "strategy", "creative"]
     assert [step.tool for step in plan.steps] == [
         "ingest",
         "timeline",
@@ -54,6 +54,7 @@ def test_rule_plan_preserves_multiple_requested_deliverables() -> None:
         "ocr",
         "ledger",
         "insights",
+        "strategy",
         "report",
         "creative",
     ]

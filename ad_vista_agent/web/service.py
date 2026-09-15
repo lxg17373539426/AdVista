@@ -798,12 +798,13 @@ class WebService:
         insight_count = insight_value.get("insight_count")
         labels = {
             "evidence": "证据提取",
-            "insights": "卖点分析",
-            "risk_audit": "风险复核",
             "report": "卖点分析报告",
+            "strategy": "营销策略建议",
             "creative": "创意建议",
         }
         generated = [labels.get(str(name), str(name)) for name in values]
+        if not generated and values:
+            generated = ["证据提取"] if set(values) == {"evidence"} else generated
         produced = "、".join(generated) if generated else "视频分析"
         if insight_count == 0:
             return (
@@ -897,6 +898,7 @@ class WebService:
             "ledger": run_dir / "ledger" / "ledger.json",
             "insights": artifact_root / "insights" / "analysis.json",
             "report": artifact_root / "report" / "report.html",
+            "strategy": artifact_root / "strategy" / "strategy.json",
         }
         hashes = {
             name: sha256_file(path)

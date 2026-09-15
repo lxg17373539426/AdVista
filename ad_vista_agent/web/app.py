@@ -28,6 +28,7 @@ EXPORTS = {
     "analysis-json": ("insights/analysis.json", "application/json"),
     "audit-json": ("critic/audit.json", "application/json"),
     "creative-json": ("creative/package.json", "application/json"),
+    "strategy-json": ("strategy/strategy.json", "application/json"),
     "marketing-html": ("marketing/marketing.html", "text/html; charset=utf-8"),
     "marketing-markdown": ("marketing/marketing.md", "text/markdown; charset=utf-8"),
 }
@@ -639,7 +640,7 @@ class _Handler(BaseHTTPRequestHandler):
                 isinstance(item, str) for item in deliverables
             ):
                 raise ValueError("Deliverables must be a JSON string array")
-            allowed = {"evidence", "insights", "risk_audit", "report", "creative"}
+            allowed = {"report", "strategy", "creative"}
             unknown = set(deliverables).difference(allowed)
             if unknown:
                 raise ValueError(f"Unknown deliverables: {', '.join(sorted(unknown))}")

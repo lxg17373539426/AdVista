@@ -10,6 +10,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel
 
 from ad_vista_agent.config import Settings
+from ad_vista_agent.context import build_context_budget, compress_evidence_context
 from ad_vista_agent.ingestion import ingest_video
 from ad_vista_agent.insights.builder import _extract_json, _load_jsonl, _runtime_model_identity
 from ad_vista_agent.insights.payload import build_ledger_payload
@@ -25,6 +26,7 @@ from ad_vista_agent.schemas import (
     MarketingAnalysis,
 )
 from ad_vista_agent.tools import QwenInsightTool, ToolContext
+from ad_vista_agent.skills import task_skill_prompt
 
 
 CREATIVE_PIPELINE_VERSION = "2"
@@ -161,7 +163,7 @@ def build_creative(
                 **_paths(output_dir),
             }
 
-    prompt = (
+    prompt = task_skill_prompt("creative") + "\n\n" + (
         "你是证据约束的广告创作 Agent。只能根据输入 Ledger 和已验证洞察创作。"
         "生成中文 Hook、短视频脚本、结构化分镜和至少两个 A/B 版本。"
         "每个创作项目必须在 evidence_refs 引用输入中存在的 speech Evidence ID 或 ocr_cluster ID。"
@@ -176,6 +178,11 @@ def build_creative(
         request.model_dump(mode="json")
         if request is not None
         else {"goal": "生成广告创意", "mode": "quick", "deliverables": ["creative"]}
+    )
+    context, context_compression = compress_evidence_context(
+        context,
+        str(context["task"].get("goal") or "广告创意生成"),
+        build_context_budget(settings),
     )
     tool = QwenInsightTool(
         settings.insight.python_executable,
@@ -231,6 +238,7 @@ def build_creative(
         "storyboard_frame_count": len(package.storyboard.frames),
         "ab_variant_count": len(package.ab_variants),
         "task": context["task"],
+        "context_compression": context_compression,
         "effective_mode_profile": {
             "mode": context["task"].get("mode", "quick"),
             "creative_depth": "deep" if context["task"].get("mode") == "deep" else "standard",

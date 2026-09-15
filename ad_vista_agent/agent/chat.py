@@ -13,6 +13,7 @@ from typing import Any, Callable, TypeVar
 from pydantic import BaseModel
 
 from ad_vista_agent.config import Settings
+from ad_vista_agent.context import build_context_budget, compress_evidence_context
 from ad_vista_agent.errors import ModelUnavailableError, PlanError
 from ad_vista_agent.creative.builder import build_creative
 from ad_vista_agent.reports.builder import build_report
@@ -894,6 +895,11 @@ def _qwen_answer(
     intent: str = "answer",
     on_delta: Callable[[str], None] | None = None,
 ) -> ConversationAnswer:
+    context, _ = compress_evidence_context(
+        context,
+        question,
+        build_context_budget(settings, output_tokens=2048),
+    )
     chinese_question = bool(re.search(r"[\u4e00-\u9fff]", question))
     prompt = (
         "你的名称是 AdVista，是专注广告视频理解与营销分析的智能助手。"

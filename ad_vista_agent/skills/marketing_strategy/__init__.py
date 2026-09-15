@@ -1,0 +1,1 @@
+"""Marketing strategy task skill."""

@@ -85,7 +85,7 @@ def test_langgraph_rejects_out_of_order_tool(monkeypatch) -> None:
         settings = base.model_copy(
             update={"paths": base.paths.model_copy(update={"output_root": root / "outputs"})}
         )
-        request = AgentRequest(goal="生成证据", deliverables=["evidence"])
+        request = AgentRequest(goal="生成报告", deliverables=["report"])
         run_dir = root / "outputs" / "runs" / "ingest_test"
         run_dir.mkdir(parents=True)
         monkeypatch.setattr(

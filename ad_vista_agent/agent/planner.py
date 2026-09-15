@@ -21,15 +21,14 @@ TOOL_DEPENDENCIES: dict[str, set[str]] = {
     "insights": {"ledger"},
     "report": {"insights"},
     "creative": {"insights"},
+    "strategy": {"insights"},
 }
-ALLOWED_DELIVERABLES = {"evidence", "insights", "risk_audit", "report", "creative"}
-CANONICAL_TOOL_ORDER = ("ingest", "timeline", "speech", "ocr", "ledger", "insights", "report", "creative")
+ALLOWED_DELIVERABLES = {"report", "strategy", "creative"}
+CANONICAL_TOOL_ORDER = ("ingest", "timeline", "speech", "ocr", "ledger", "insights", "strategy", "report", "creative")
 ANSWER_TOOLS = {"ingest", "timeline", "speech", "ocr", "ledger"}
 DELIVERABLE_TOOL = {
-    "evidence": "ledger",
-    "insights": "insights",
-    "risk_audit": "report",
     "report": "report",
+    "strategy": "strategy",
     "creative": "creative",
 }
 
@@ -127,14 +126,12 @@ def rule_plan(request: AgentRequest) -> AnalysisPlan:
     requested = [item for item in request.deliverables if item in ALLOWED_DELIVERABLES]
     if requested:
         deliverables = requested
-    elif any(term in goal for term in ("证据", "字幕", "语音", "ocr", "asr", "evidence")) and not any(
-        term in goal for term in ("卖点", "风险", "报告", "洞察", "受众", "营销", "risk", "report", "insight")
-    ):
-        deliverables = ["evidence"]
-    elif any(term in goal for term in ("卖点", "受众", "痛点", "洞察", "营销", "insight")) and not any(
+    elif any(term in goal for term in ("策略", "定位", "传播", "转化", "strategy", "marketing strategy")):
+        deliverables = ["strategy"]
+    elif any(term in goal for term in ("证据", "字幕", "语音", "ocr", "asr", "evidence", "卖点", "受众", "痛点", "洞察", "营销", "insight", "广告分析")) and not any(
         term in goal for term in ("报告", "风险", "合规", "risk", "report")
     ):
-        deliverables = ["insights"]
+        deliverables = ["report"]
     elif any(term in goal for term in ("hook", "脚本", "分镜", "创作", "a/b", "ab", "广告文案")):
         deliverables = ["creative"]
     else:
@@ -184,14 +181,10 @@ def validate_plan(plan: AnalysisPlan, registry: ToolRegistry, request: AgentRequ
         raise ValueError(f"Unknown deliverables: {', '.join(sorted(invalid_deliverables))}")
     if "report" in plan.deliverables and "report" not in completed:
         raise ValueError("Report deliverable requires the report tool")
-    if "risk_audit" in plan.deliverables and "report" not in completed:
-        raise ValueError("Risk-audit deliverable requires the report tool")
-    if "insights" in plan.deliverables and "insights" not in completed:
-        raise ValueError("Insights deliverable requires the insights tool")
+    if "strategy" in plan.deliverables and "strategy" not in completed:
+        raise ValueError("Strategy deliverable requires the strategy tool")
     if "creative" in plan.deliverables and "creative" not in completed:
         raise ValueError("Creative deliverable requires the creative tool")
-    if "evidence" in plan.deliverables and "ledger" not in completed:
-        raise ValueError("Evidence deliverable requires the ledger tool")
     return plan
 
 
@@ -202,7 +195,7 @@ def qwen_plan(request: AgentRequest, registry: ToolRegistry, settings: Settings)
         "你是受约束的广告分析 Agent Planner。只决定需要哪些工具和交付物，不生成执行步骤或参数。"
         "selected_tools 只能使用工具列表中的名称，并且只能选择目标所需的最终能力；本地编译器会补齐依赖。"
         "如果 request.deliverables 非空，必须严格服从这些交付物，不得增加其他最终工具。"
-        "不要执行工具。deliverables 仅允许 evidence、insights、risk_audit、report、creative。goal 必须原样复制。"
+        "不要执行工具。deliverables 仅允许 report、strategy、creative。证据提取是这些任务的内部前置阶段。goal 必须原样复制。"
         "response_mode=answer 表示用户在询问视频内容，分析完成后应直接回答原问题；"
         "response_mode=artifact 表示用户明确要求报告、分析、证据、脚本等可下载交付物。"
         "不要依赖固定关键词，按用户语义和期望的最终结果判断。"

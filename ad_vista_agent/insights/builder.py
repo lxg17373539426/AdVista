@@ -12,6 +12,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel
 
 from ad_vista_agent.config import Settings
+from ad_vista_agent.context import build_context_budget, compress_evidence_context
 from ad_vista_agent.ingestion import ingest_video
 from ad_vista_agent.runtime import ArtifactStore, sha256_file
 from ad_vista_agent.runtime.stage_cache import stage_cache_key
@@ -25,6 +26,7 @@ from ad_vista_agent.schemas import (
     MarketingAnalysis,
 )
 from ad_vista_agent.tools import QwenInsightTool, ToolContext
+from ad_vista_agent.skills import task_skill_prompt
 
 from .grounding import (
     grounded_executive_summary,
@@ -383,7 +385,7 @@ def build_insights(
                 "cache_key": cache_key,
             }
 
-    prompt = prompt_path.read_text(encoding="utf-8").replace(
+    prompt = (task_skill_prompt("report") + "\n\n" + prompt_path.read_text(encoding="utf-8")).replace(
         "{max_insights_per_dimension}", str(max_insights)
     )
     ledger_payload = build_ledger_payload(ledger, evidence, clusters, relations)
@@ -408,22 +410,23 @@ def build_insights(
         visual_observations_path,
         {"observations": [item.model_dump(mode="json") for item in visual_observations]},
     )
+    model_context, context_compression = compress_evidence_context(
+        {
+            "task": task_payload,
+            "evidence_ledger": ledger_payload,
+            "visual_observations": [item.model_dump(mode="json") for item in visual_observations],
+            "allowed_keyframe_ids": [item.keyframe_id for item in keyframes],
+        },
+        str(task_payload.get("goal") or "广告卖点分析"),
+        build_context_budget(settings),
+    )
     messages = [
         {"role": "system", "content": prompt},
         {
             "role": "user",
             "content": "请围绕 TASK 的用户目标，综合完整视频的视觉观察与 EVIDENCE_LEDGER 输出结构化广告洞察。"
             "目标只决定分析重点，不能降低证据标准。\n"
-            + json.dumps(
-                {
-                    "task": task_payload,
-                    "evidence_ledger": ledger_payload,
-                    "visual_observations": [item.model_dump(mode="json") for item in visual_observations],
-                    "allowed_keyframe_ids": [item.keyframe_id for item in keyframes],
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
+            + json.dumps(model_context, ensure_ascii=False, separators=(",", ":")),
         },
     ]
     analysis_path.unlink(missing_ok=True)
@@ -496,6 +499,7 @@ def build_insights(
             settings.insight.visual_batch_overlap,
         ),
         "task": task_payload,
+        "context_compression": context_compression,
         "effective_mode_profile": {
             "mode": task_payload.get("mode", "quick"),
             "max_insights_per_dimension": max_insights,

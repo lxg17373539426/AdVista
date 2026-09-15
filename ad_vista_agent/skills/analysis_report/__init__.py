@@ -1,0 +1,1 @@
+"""Analysis report task skill."""

@@ -12,7 +12,8 @@ def test_web_tasks_have_clear_single_purpose_boundaries() -> None:
     assert "完整报告" not in html
     assert "查看结果" not in html
     assert "卖点分析报告" in html
-    assert "证据提取" in html
+    assert "营销策略建议" in html
+    assert "风险复核" not in html
     assert 'type="radio"' in html
 
 
@@ -21,7 +22,7 @@ def test_generated_downloads_are_rendered_in_conversation() -> None:
 
     assert "resultActions" in script
     assert "查看卖点分析报告" in script
-    assert "查看证据提取文档" in script
+    assert "在线查看证据链" in script
     assert "result-action" in script
 
 
@@ -127,16 +128,16 @@ def test_empty_report_download_is_not_offered() -> None:
     script = (STATIC / "app.js").read_text(encoding="utf-8")
 
     assert 'const available=empty?generated.filter(item=>item==="evidence"):generated' in script
-    assert 'selected.has("risk_audit")&&!includeEvidence' in script
+    assert 'selected.has("strategy")' in script
 
 
 def test_documents_are_single_intent_and_evidence_has_real_exports() -> None:
     from ad_vista_agent.agent.planner import rule_plan
     from ad_vista_agent.schemas import AgentRequest
 
-    plan = rule_plan(AgentRequest(goal="请提取证据", deliverables=[]))
-    assert plan.deliverables == ["evidence"]
-    assert rule_plan(AgentRequest(goal="请分析卖点", deliverables=[])).deliverables == ["insights"]
+    plan = rule_plan(AgentRequest(goal="请提取广告卖点信息", deliverables=[]))
+    assert plan.deliverables == ["report"]
+    assert rule_plan(AgentRequest(goal="请制定营销策略", deliverables=[])).deliverables == ["strategy"]
     assert rule_plan(AgentRequest(goal="请生成报告", deliverables=[])).deliverables == ["report"]
 
     app = (STATIC.parents[1] / "web" / "app.py").read_text(encoding="utf-8")

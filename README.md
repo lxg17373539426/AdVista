@@ -1,6 +1,6 @@
 # AdVista Insight Agent
 
-AdVista Insight Agent 是一个用于广告视频理解和营销分析的多模态 Agent。它可以从本地广告视频中提取语音、画面文字和时间线证据，并生成广告洞察、风险审计、分析报告以及创意方案。
+AdVista Insight Agent 是一个用于广告视频理解和营销分析的多模态 Agent。它可以从本地广告视频中提取广告卖点相关证据，并生成卖点分析报告、营销策略建议以及创意方案。风险和功效声明审计作为内部质量控制阶段运行，不再作为独立用户任务。
 
 Agent 控制层使用 **LangGraph ReAct**，使用 LangChain 的 Structured Tools 接入现有视频分析工具，并通过 vLLM 调用 AdInsight-RL。原有确定性的证据流水线仍作为工具执行层，确保工具依赖、证据引用和审计规则不会被模型绕过。
 
@@ -215,3 +215,11 @@ bash scripts/start_qwen_server.sh
 ```bash
 .venv/bin/advista-agent run /path/to/ad.mp4 --config configs/local.yaml
 ```
+
+Agent 的三个可选交付任务为：
+
+- `report`：提取证据并生成卖点分析报告，包含卖点、受众线索、创意结构、转化路径和内部风险审计。
+- `strategy`：基于已验证卖点生成定位、传播、渠道和转化建议，并区分事实、推论和待验证假设。
+- `creative`：基于证据生成 Hook、脚本、分镜、CTA 和 A/B 方案。
+
+证据提取是上述交付任务的共享内部前置阶段；视频问答可在任务完成后继续使用。系统不会接受新的 `risk_audit` 公开任务，但会保留历史任务读取和报告内部的风险审计。

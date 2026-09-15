@@ -38,6 +38,7 @@ from .plans import (
     ToolCallStatus,
 )
 from .reports import AnalysisReport
+from .strategy import MarketingStrategy
 from .speech import SpeechTranscript, TranscriptSegment, TranscriptWord
 from .timeline import Keyframe, Shot, Timeline, TimelineCoverage
 
@@ -72,6 +73,7 @@ __all__ = [
     "MediaMetadata",
     "MarketingAnalysis",
     "MarketingDimension",
+    "MarketingStrategy",
     "OcrFrameResult",
     "OcrRegion",
     "Keyframe",

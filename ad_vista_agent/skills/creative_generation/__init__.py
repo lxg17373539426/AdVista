@@ -1,0 +1,1 @@
+"""Creative generation task skill."""

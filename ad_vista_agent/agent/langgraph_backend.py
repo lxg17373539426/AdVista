@@ -106,6 +106,7 @@ def _observation(output: dict[str, Any]) -> dict[str, object]:
         "status", "cache_hit", "run_id", "run_dir", "artifact_root", "insight_count",
         "audit_status", "evidence_count", "cluster_count", "markdown", "html",
         "package", "hooks", "script", "storyboard", "ab_plan",
+        "strategy",
     )
     return {key: output[key] for key in keys if key in output}
 

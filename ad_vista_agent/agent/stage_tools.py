@@ -11,6 +11,7 @@ from ad_vista_agent.ledger.builder import build_ledger
 from ad_vista_agent.ocr.builder import build_ocr
 from ad_vista_agent.reports.builder import build_report
 from ad_vista_agent.speech.builder import build_speech
+from ad_vista_agent.strategy.builder import build_strategy
 from ad_vista_agent.timeline.builder import build_timeline
 from ad_vista_agent.schemas import AgentRequest
 from ad_vista_agent.tools import Tool, ToolContext, ToolRegistry
@@ -108,6 +109,10 @@ def _creative(path: Path, settings: Settings, force: bool, request: AgentRequest
     return build_creative(path, settings, force=force, request=request, artifact_root=artifact_root)
 
 
+def _strategy(path: Path, settings: Settings, force: bool, request: AgentRequest | None, artifact_root: Path | None) -> dict[str, Any]:
+    return build_strategy(path, settings, force=force, request=request, artifact_root=artifact_root)
+
+
 def build_agent_registry(settings: Settings) -> ToolRegistry:
     registry = ToolRegistry()
     for tool in (
@@ -117,6 +122,7 @@ def build_agent_registry(settings: Settings) -> ToolRegistry:
         StageTool("ocr", "生成带区域的画面文字证据", _ocr, settings, requires_gpu=True),
         StageTool("ledger", "构建统一 Evidence Ledger", _ledger, settings),
         StageTool("insights", "生成证据约束的营销洞察", _insights, settings, requires_gpu=True),
+        StageTool("strategy", "基于证据生成营销定位、传播和转化建议", _strategy, settings, requires_gpu=True),
         StageTool("report", "审计洞察并生成报告", _report, settings),
         StageTool("creative", "基于证据生成 Hook、脚本、分镜和 A/B 方案", _creative, settings, requires_gpu=True),
     ):
