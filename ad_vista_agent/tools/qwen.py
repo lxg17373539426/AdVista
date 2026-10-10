@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import urllib.error
 import urllib.request
 import uuid
@@ -10,12 +11,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .base import Tool, ToolContext
-from ad_vista_agent.runtime.process import ProcessCancelled, run_process
 from ad_vista_agent.errors import ModelTimeoutError, ModelUnavailableError
+from ad_vista_agent.runtime.http import cancellable_urlopen
+from ad_vista_agent.runtime.process import ProcessCancelled, run_process
 
+from .base import Tool, ToolContext
 
 MAX_IMAGES_PER_PROMPT = 8
+UNKNOWN_RUNTIME_VERSIONS = {
+    name: "unknown" for name in ("vllm", "torch", "transformers")
+}
 
 
 def _image_count(messages: list[dict[str, Any]]) -> int:
@@ -72,12 +77,14 @@ class QwenInsightTool(Tool):
                 f"AdVista 单次分析最多支持 {self.max_images_per_prompt} 张关键帧，当前为 {image_count} 张"
             )
         if self.runtime == "openai":
-            return self._run_openai(arguments)
+            return self._run_openai(arguments, cancel_event=context.cancel_event)
         if self.runtime != "subprocess":
             raise ValueError(f"Unsupported Qwen runtime: {self.runtime}")
         return self._run_subprocess(context, arguments)
 
-    def _run_openai(self, arguments: dict[str, Any]) -> QwenInsightResult:
+    def _run_openai(
+        self, arguments: dict[str, Any], *, cancel_event: threading.Event | None = None
+    ) -> QwenInsightResult:
         messages = list(arguments["messages"])
         sampling = {
             "temperature": float(arguments["temperature"]),
@@ -99,12 +106,20 @@ class QwenInsightTool(Tool):
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(call, timeout=self.timeout_seconds) as response:
+                with cancellable_urlopen(
+                    call, timeout=self.timeout_seconds, cancel_event=cancel_event
+                ) as response:
                     value = json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")
-                raise ModelUnavailableError(f"AdVista 分析服务 HTTP {exc.code}: {body[-4000:]}") from exc
-            except (urllib.error.URLError, TimeoutError) as exc:
+                raise ModelUnavailableError(
+                    f"AdVista 分析服务 HTTP {exc.code}: {body[-4000:]}"
+                ) from exc
+            except TimeoutError as exc:
+                raise ModelTimeoutError(f"AdVista 分析服务请求超时: {exc}") from exc
+            except urllib.error.URLError as exc:
+                if isinstance(exc.reason, TimeoutError):
+                    raise ModelTimeoutError(f"AdVista 分析服务请求超时: {exc}") from exc
                 raise ModelUnavailableError(f"AdVista 分析服务请求失败: {exc}") from exc
             try:
                 text = str(value["choices"][0]["message"]["content"])
@@ -114,7 +129,7 @@ class QwenInsightTool(Tool):
                     for key in ("prompt_tokens", "completion_tokens")
                 }
                 return text, usage
-            except (KeyError, TypeError, ValueError) as exc:
+            except (IndexError, KeyError, TypeError, ValueError) as exc:
                 raise RuntimeError("AdVista 分析服务返回了无效响应") from exc
 
         text, usage = request(messages)
@@ -146,10 +161,13 @@ class QwenInsightTool(Tool):
             attempt_count=len(attempts),
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
-            versions={"vllm": "0.19.1", "torch": "2.10.0", "transformers": "5.13.0"},
+            # OpenAI-compatible completions do not attest server package versions.
+            versions=UNKNOWN_RUNTIME_VERSIONS.copy(),
         )
 
-    def _run_subprocess(self, context: ToolContext, arguments: dict[str, Any]) -> QwenInsightResult:
+    def _run_subprocess(
+        self, context: ToolContext, arguments: dict[str, Any]
+    ) -> QwenInsightResult:
         if not self.python_executable.is_file():
             raise FileNotFoundError(self.python_executable)
         insight_dir = context.run_dir / "insights"
@@ -159,7 +177,9 @@ class QwenInsightTool(Tool):
         response_path = insight_dir / f"qwen_response_{call_id}.json"
         payload = dict(arguments)
         payload["response_path"] = str(response_path)
-        request_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        request_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         response_path.unlink(missing_ok=True)
         environment = os.environ.copy()
         environment["CUDA_VISIBLE_DEVICES"] = self.cuda_visible_devices
@@ -178,7 +198,9 @@ class QwenInsightTool(Tool):
                 cancel_event=context.cancel_event,
             )
             if result.returncode != 0:
-                raise RuntimeError(f"Qwen insight inference failed: {result.stderr.strip()[-4000:]}")
+                raise RuntimeError(
+                    f"Qwen insight inference failed: {result.stderr.strip()[-4000:]}"
+                )
             if not response_path.is_file():
                 raise RuntimeError("Qwen insight worker produced no response file")
             response = json.loads(response_path.read_text(encoding="utf-8"))
@@ -188,14 +210,20 @@ class QwenInsightTool(Tool):
                 attempt_count=int(response["attempt_count"]),
                 prompt_tokens=int(response["prompt_tokens"]),
                 completion_tokens=int(response["completion_tokens"]),
-                versions={str(key): str(value) for key, value in response["versions"].items()},
+                versions={
+                    str(key): str(value) for key, value in response["versions"].items()
+                },
             )
         except ProcessCancelled as exc:
             raise RuntimeError("Qwen insight inference cancelled") from exc
         except subprocess.TimeoutExpired as exc:
-            raise ModelTimeoutError(f"Qwen insight inference timed out after {self.timeout_seconds}s") from exc
+            raise ModelTimeoutError(
+                f"Qwen insight inference timed out after {self.timeout_seconds}s"
+            ) from exc
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise RuntimeError("Qwen insight worker returned an invalid response") from exc
+            raise RuntimeError(
+                "Qwen insight worker returned an invalid response"
+            ) from exc
         finally:
             request_path.unlink(missing_ok=True)
             response_path.unlink(missing_ok=True)

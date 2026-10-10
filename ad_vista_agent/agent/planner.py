@@ -3,15 +3,15 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ad_vista_agent.config import Settings
+from ad_vista_agent.errors import ModelUnavailableError, PlanError
+from ad_vista_agent.runtime.http import cancellable_urlopen
 from ad_vista_agent.schemas import AgentRequest, AnalysisPlan, PlanStep
 from ad_vista_agent.tools import ToolRegistry
-from ad_vista_agent.errors import ModelUnavailableError, PlanError
-
+from ad_vista_agent.tools.base import get_active_cancel_event
 
 TOOL_DEPENDENCIES: dict[str, set[str]] = {
     "timeline": {"ingest"},
@@ -31,6 +31,31 @@ DELIVERABLE_TOOL = {
     "strategy": "strategy",
     "creative": "creative",
 }
+DIRECT_MARKETING_TERMS = (
+    "营销方案",
+    "推广方案",
+    "销售方案",
+    "营销计划",
+    "marketing plan",
+)
+ARTIFACT_REQUEST_TERMS = (
+    "下载",
+    "导出",
+    "文件",
+    "json",
+    "交付物",
+    "可下载",
+)
+
+
+def is_direct_marketing_answer(request: AgentRequest) -> bool:
+    """Return true when the user wants an in-chat plan, not a strategy artifact."""
+    if request.deliverables:
+        return False
+    goal = request.goal.casefold()
+    return any(term in goal for term in DIRECT_MARKETING_TERMS) and not any(
+        term in goal for term in ARTIFACT_REQUEST_TERMS
+    )
 
 
 class PlannerDecision(BaseModel):
@@ -104,6 +129,10 @@ def compile_decision(decision: PlannerDecision, request: AgentRequest) -> Analys
         deliverables = list(request.deliverables)
         selected = set()
         response_mode = "artifact"
+    elif is_direct_marketing_answer(request):
+        selected = set(ANSWER_TOOLS)
+        deliverables = []
+        response_mode = "answer"
     else:
         response_mode = decision.response_mode
         if response_mode == "answer":
@@ -126,7 +155,14 @@ def rule_plan(request: AgentRequest) -> AnalysisPlan:
     requested = [item for item in request.deliverables if item in ALLOWED_DELIVERABLES]
     if requested:
         deliverables = requested
-    elif any(term in goal for term in ("策略", "定位", "传播", "转化", "strategy", "marketing strategy")):
+    elif is_direct_marketing_answer(request):
+        return _build_plan(
+            request,
+            [],
+            selected_tools=ANSWER_TOOLS,
+            response_mode="answer",
+        )
+    elif any(term in goal for term in DIRECT_MARKETING_TERMS) or any(term in goal for term in ("策略", "定位", "传播", "转化", "strategy", "marketing strategy")):
         deliverables = ["strategy"]
     elif any(term in goal for term in ("证据", "字幕", "语音", "ocr", "asr", "evidence", "卖点", "受众", "痛点", "洞察", "营销", "insight", "广告分析")) and not any(
         term in goal for term in ("报告", "风险", "合规", "risk", "report")
@@ -198,6 +234,8 @@ def qwen_plan(request: AgentRequest, registry: ToolRegistry, settings: Settings)
         "不要执行工具。deliverables 仅允许 report、strategy、creative。证据提取是这些任务的内部前置阶段。goal 必须原样复制。"
         "response_mode=answer 表示用户在询问视频内容，分析完成后应直接回答原问题；"
         "response_mode=artifact 表示用户明确要求报告、分析、证据、脚本等可下载交付物。"
+        "用户要求营销方案、推广方案、销售方案或营销计划，但没有要求下载、导出或特定文件时，"
+        "应选择 response_mode=answer，仅提取回答所需证据，不生成 strategy 制品。"
         "不要依赖固定关键词，按用户语义和期望的最终结果判断。"
     )
     payload = {
@@ -231,7 +269,7 @@ def qwen_plan(request: AgentRequest, registry: ToolRegistry, settings: Settings)
         method="POST",
     )
     try:
-        with urllib.request.urlopen(call, timeout=settings.insight.timeout_seconds) as response:
+        with cancellable_urlopen(call, timeout=settings.insight.timeout_seconds, cancel_event=get_active_cancel_event()) as response:
             value = json.loads(response.read().decode("utf-8"))
         text = str(value["choices"][0]["message"]["content"])
         try:
@@ -257,7 +295,7 @@ def qwen_plan(request: AgentRequest, registry: ToolRegistry, settings: Settings)
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(repair_call, timeout=settings.insight.timeout_seconds) as repair_response:
+            with cancellable_urlopen(repair_call, timeout=settings.insight.timeout_seconds, cancel_event=get_active_cancel_event()) as repair_response:
                 repaired = json.loads(repair_response.read().decode("utf-8"))
             decision = PlannerDecision.model_validate_json(
                 str(repaired["choices"][0]["message"]["content"])

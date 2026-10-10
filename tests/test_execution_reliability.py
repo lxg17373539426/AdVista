@@ -2,14 +2,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from ad_vista_agent.agent.core import _execute_state, _make_state
+from ad_vista_agent.agent.orchestrator import PIPELINE_STAGE_NAMES, run_pipeline
 from ad_vista_agent.agent.planner import rule_plan
 from ad_vista_agent.agent.stage_tools import build_agent_registry
-from ad_vista_agent.agent.orchestrator import PIPELINE_STAGE_NAMES, run_pipeline
 from ad_vista_agent.config import load_settings
 from ad_vista_agent.runtime import ArtifactStore
 from ad_vista_agent.schemas import AgentRequest, StepStatus
-from ad_vista_agent.tools.qwen import QwenInsightTool
 from ad_vista_agent.tools import ToolContext
+from ad_vista_agent.tools.qwen import QwenInsightTool
 
 
 def _settings(root: Path):
@@ -147,7 +147,7 @@ def test_qwen_subprocess_paths_are_unique() -> None:
             captured.append(request)
             raise RuntimeError("stop before worker")
 
-        import ad_vista_agent.tools.qwen as qwen
+        from ad_vista_agent.tools import qwen
 
         original = qwen.run_process
         qwen.run_process = fake_run

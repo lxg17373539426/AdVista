@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-import sqlite3
 import json
+import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .connection import Database
-from .conversations import PostgresConversationStore
-from .contexts import ContextRepository
-from .requests import RequestRepository
 from ad_vista_agent.runtime import sha256_file
+
+from .connection import Database
+from .contexts import ContextRepository
+from .conversations import PostgresConversationStore
+from .models import AnswerVersion, Conversation, Feedback, Message
+from .requests import RequestRepository
 
 
 def migrate_sqlite_conversations(sqlite_path: Path, database: Database) -> dict[str, int]:
@@ -20,11 +23,26 @@ def migrate_sqlite_conversations(sqlite_path: Path, database: Database) -> dict[
     counts = {"sessions": 0, "messages": 0, "feedback": 0, "answer_versions": 0, "skipped": 0}
     with sqlite3.connect(sqlite_path) as source:
         source.row_factory = sqlite3.Row
+        session_columns = {row["name"] for row in source.execute("PRAGMA table_info(sessions)")}
+        title_column = "title" if "title" in session_columns else "NULL AS title"
+        active_filter = ""
+        if "deleted_at" in session_columns:
+            active_filter = " WHERE deleted_at IS NULL"
+            counts["skipped"] += source.execute("SELECT COUNT(*) FROM sessions WHERE deleted_at IS NOT NULL").fetchone()[0]
         sessions = source.execute(
-            "SELECT session_id, run_id, source_path, goal, status, created_at, updated_at FROM sessions ORDER BY created_at, session_id"
+            "SELECT session_id, run_id, source_path, goal, status, created_at, updated_at, "
+            f"{title_column} FROM sessions{active_filter} ORDER BY created_at, session_id"
         ).fetchall()
         for item in sessions:
             session_id = str(item["session_id"])
+            created_at = _legacy_timestamp(item["created_at"])
+            updated_at = _legacy_timestamp(item["updated_at"])
+            with database.session() as check:
+                existing_conversation = check.get(Conversation, session_id)
+                if existing_conversation is not None and existing_conversation.deleted_at is not None:
+                    counts["skipped"] += 1
+                    continue
+                new_conversation = existing_conversation is None
             try:
                 target.create_session(
                     session_id=session_id,
@@ -35,19 +53,19 @@ def migrate_sqlite_conversations(sqlite_path: Path, database: Database) -> dict[
             except ValueError:
                 counts["skipped"] += 1
                 continue
-            target.set_status(session_id, str(item["status"]))
+            if new_conversation:
+                target.set_status(session_id, str(item["status"]))
             counts["sessions"] += 1
             for message in source.execute(
-                "SELECT message_id, role, content, citations_json FROM messages WHERE session_id = ? ORDER BY created_at, message_id",
+                "SELECT message_id, role, content, citations_json, created_at FROM messages WHERE session_id = ? ORDER BY created_at, message_id",
                 (session_id,),
             ):
                 with database.session() as check:
-                    from .models import Message
-
                     if check.get(Message, str(message["message_id"])) is not None:
                         counts["skipped"] += 1
                         continue
                 citations = _json_list(message["citations_json"])
+                message_created_at = _legacy_timestamp(message["created_at"])
                 target.add_message(
                     session_id,
                     str(message["role"]),
@@ -55,17 +73,17 @@ def migrate_sqlite_conversations(sqlite_path: Path, database: Database) -> dict[
                     citations,
                     message_id=str(message["message_id"]),
                 )
+                _restore_created_at(database, Message, str(message["message_id"]), message_created_at)
                 counts["messages"] += 1
             for feedback in source.execute(
                 "SELECT feedback_id, message_id, decision, note, created_at FROM feedback WHERE session_id = ? ORDER BY created_at, feedback_id",
                 (session_id,),
             ):
                 with database.session() as check:
-                    from .models import Feedback
-
                     if check.get(Feedback, str(feedback["feedback_id"])) is not None:
                         counts["skipped"] += 1
                         continue
+                feedback_created_at = _legacy_timestamp(feedback["created_at"])
                 target.add_feedback(
                     session_id,
                     str(feedback["decision"]),
@@ -73,27 +91,50 @@ def migrate_sqlite_conversations(sqlite_path: Path, database: Database) -> dict[
                     str(feedback["message_id"]) if feedback["message_id"] else None,
                     feedback_id=str(feedback["feedback_id"]),
                 )
+                _restore_created_at(database, Feedback, str(feedback["feedback_id"]), feedback_created_at)
                 counts["feedback"] += 1
             # Answer versions are migrated only when their referenced message
             # exists; their old IDs remain in the source audit trail.
             for version in source.execute(
-                "SELECT version_id, message_id, answer_json FROM answer_versions WHERE session_id = ? ORDER BY created_at, version_id",
+                "SELECT version_id, message_id, answer_json, created_at FROM answer_versions WHERE session_id = ? ORDER BY created_at, version_id",
                 (session_id,),
             ):
                 with database.session() as check:
-                    from .models import AnswerVersion
-
                     if check.get(AnswerVersion, str(version["version_id"])) is not None:
                         counts["skipped"] += 1
                         continue
+                version_created_at = _legacy_timestamp(version["created_at"])
                 target.add_version(
                     session_id,
                     str(version["message_id"]),
                     _json_object(version["answer_json"]),
                     version_id=str(version["version_id"]),
                 )
+                _restore_created_at(database, AnswerVersion, str(version["version_id"]), version_created_at)
                 counts["answer_versions"] += 1
+            if new_conversation:
+                with database.session() as session:
+                    conversation = session.get(Conversation, session_id)
+                    if conversation is not None:
+                        if item["title"] is not None and item["title"] != "":
+                            conversation.title = str(item["title"])
+                        conversation.created_at = created_at
+                        conversation.updated_at = updated_at
     return counts
+
+
+def _legacy_timestamp(value: str) -> datetime:
+    timestamp = datetime.fromisoformat(value)
+    # Legacy store writes UTC. Older exports without a zone use that same
+    # convention rather than the deployment machine's local timezone.
+    return timestamp if timestamp.tzinfo is not None else timestamp.replace(tzinfo=UTC)
+
+
+def _restore_created_at(database: Database, model: Any, identifier: str, created_at: datetime) -> None:
+    with database.session() as session:
+        record = session.get(model, identifier)
+        if record is not None:
+            record.created_at = created_at
 
 
 def migrate_json_jobs(job_root: Path, database: Database) -> dict[str, int]:
@@ -150,7 +191,7 @@ def migrate_json_jobs(job_root: Path, database: Database) -> dict[str, int]:
                 content=str(raw.get("goal") or "视频分析"),
                 request_id=request.request_id,
             )
-        execution = executions.create(
+        executions.create(
             execution_id=execution_id,
             request_id=request.request_id,
             model_version=None,

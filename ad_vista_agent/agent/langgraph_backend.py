@@ -8,12 +8,13 @@ import uuid
 from pathlib import Path
 from typing import Annotated, Any, TypedDict, cast
 
+import httpx
 from langchain_core.messages import (
     AIMessage,
     AnyMessage,
     HumanMessage,
-    ToolMessage,
     SystemMessage,
+    ToolMessage,
     messages_from_dict,
     messages_to_dict,
 )
@@ -36,9 +37,10 @@ from ad_vista_agent.schemas import (
     ToolCallStatus,
 )
 from ad_vista_agent.tools import ToolContext, ToolRegistry
+from ad_vista_agent.tools.base import get_active_cancel_event
 
+from .http_transport import CancellableModelTransport
 from .planner import CANONICAL_TOOL_ORDER, TOOL_DEPENDENCIES, rule_plan, validate_plan
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -76,7 +78,7 @@ def _restore_graph_state(store: ArtifactStore, state_dir: Path) -> ReActState | 
     value = store.read_json(path)
     raw_messages = value.get("messages", [])
     if not isinstance(raw_messages, list):
-        raise ValueError("Persisted LangGraph messages must be a list")
+        raise ValueError("Persisted LangGraph messages must be a list")  # noqa: TRY004 — 保留对文件内容验证的 ValueError 契约。
     return cast(ReActState, {
         "messages": messages_from_dict(raw_messages),
         "completed_tools": [str(item) for item in value.get("completed_tools", [])],
@@ -111,7 +113,7 @@ def _observation(output: dict[str, Any]) -> dict[str, object]:
     return {key: output[key] for key in keys if key in output}
 
 
-def _model(settings: Settings) -> ChatOpenAI:
+def _model(settings: Settings, *, http_client: httpx.Client | None = None) -> ChatOpenAI:
     return ChatOpenAI(
         model=settings.insight.served_model,
         base_url=settings.insight.endpoint,
@@ -119,6 +121,7 @@ def _model(settings: Settings) -> ChatOpenAI:
         temperature=settings.insight.temperature,
         timeout=settings.insight.timeout_seconds,
         max_retries=0,
+        http_client=http_client,
     )
 
 
@@ -136,6 +139,8 @@ def run_langgraph_agent(
     existing_state: AgentSessionState | None = None,
     ingestion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if cancel_event is None:
+        cancel_event = get_active_cancel_event()
     source = video_path.expanduser().resolve()
     if not source.is_file():
         raise FileNotFoundError(source)
@@ -205,6 +210,7 @@ def run_langgraph_agent(
             if name in required
             and name not in completed
             and TOOL_DEPENDENCIES.get(name, set()).issubset(completed)
+            and (name != "creative" or "report" not in required or "report" in completed)
         ]
 
     def make_tool(name: str) -> StructuredTool:
@@ -262,14 +268,17 @@ def run_langgraph_agent(
             description=f"执行广告分析阶段 {name}。只能在满足前置依赖时调用。",
         )
 
-    llm = chat_model or _model(settings)
-    graph = StateGraph(ReActState)
+    graph: StateGraph[ReActState, None, ReActState, ReActState] = StateGraph(ReActState)
 
     def agent_node(state: ReActState) -> dict[str, Any]:
+        if cancel_event is not None and cancel_event.is_set():
+            return {"status": AgentRunStatus.CANCELLED.value}
+        if session.confirmations:
+            return {"status": AgentRunStatus.WAITING_CONFIRMATION.value}
         completed = set(state.get("completed_tools", []))
         available = ready_tools(completed)
         if not available:
-            result = {"status": "complete"}
+            result: dict[str, Any] = {"status": "complete"}
             persist_graph(_next_graph_state(state, result))
             return result
         LOGGER.info(
@@ -297,6 +306,8 @@ def run_langgraph_agent(
         return result
 
     def tool_node(state: ReActState) -> dict[str, Any]:
+        if cancel_event is not None and cancel_event.is_set():
+            return {"status": AgentRunStatus.CANCELLED.value}
         message = state.get("messages", [])[-1]
         if not isinstance(message, AIMessage):
             return {"status": "failed", "error": "ReAct did not return an AI message"}
@@ -309,6 +320,14 @@ def run_langgraph_agent(
         messages: list[AnyMessage] = []
         for call in message.tool_calls:
             name = str(call["name"])
+            if session.confirmations:
+                # Answer every requested call so the next model invocation has
+                # valid tool history, while leaving deferred tools unexecuted.
+                messages.append(ToolMessage(
+                    content="工具调用已暂缓，等待人工审核批准。",
+                    tool_call_id=str(call["id"]),
+                ))
+                continue
             previous = next(
                 (
                     record
@@ -329,21 +348,33 @@ def run_langgraph_agent(
             available = ready_tools(completed)
             if name not in available:
                 raise ValueError(f"ReAct selected unavailable or out-of-order tool: {name}")
-            result = make_tool(name).invoke(call.get("args") or {})
+            tool_result = make_tool(name).invoke(call.get("args") or {})
             completed.add(name)
-            messages.append(ToolMessage(content=str(result), tool_call_id=str(call["id"])))
-        result = {"messages": messages, "completed_tools": sorted(completed)}
+            messages.append(ToolMessage(content=str(tool_result), tool_call_id=str(call["id"])))
+        result: dict[str, Any] = {"messages": messages, "completed_tools": sorted(completed)}
+        if session.confirmations:
+            result["status"] = AgentRunStatus.WAITING_CONFIRMATION.value
         persist_graph(_next_graph_state(state, result))
         return result
 
     def route(state: ReActState) -> str:
-        if state.get("status") == "complete":
+        if state.get("status") in {
+            "complete", AgentRunStatus.WAITING_CONFIRMATION.value,
+            AgentRunStatus.CANCELLED.value,
+        }:
             return "finish"
         message = state.get("messages", [])[-1]
         return "tools" if isinstance(message, AIMessage) and message.tool_calls else "finish"
 
     def finish(state: ReActState) -> dict[str, Any]:
-        if len(set(state.get("completed_tools", []))) < len(required):
+        if state.get("status") == AgentRunStatus.CANCELLED.value:
+            session.status = AgentRunStatus.CANCELLED
+            session.error = "Agent execution cancelled"
+            persist()
+            result = {"status": session.status.value}
+            persist_graph(_next_graph_state(state, result))
+            return result
+        if not session.confirmations and not set(required).issubset(state.get("completed_tools", [])):
             raise RuntimeError("ReAct finished before all required tools completed")
         from .core import _deliver
 
@@ -365,9 +396,21 @@ def run_langgraph_agent(
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tool_node)
     graph.add_node("finish", finish)
-    graph.add_edge(START, "agent")
+    def entry_route(state: ReActState) -> str:
+        messages = state.get("messages", [])
+        if messages and isinstance(messages[-1], AIMessage) and messages[-1].tool_calls:
+            return "tools"
+        return "agent"
+
+    graph.add_conditional_edges(START, entry_route, {"tools": "tools", "agent": "agent"})
     graph.add_conditional_edges("agent", route, {"tools": "tools", "finish": "finish"})
-    graph.add_edge("tools", "agent")
+    graph.add_conditional_edges(
+        "tools",
+        lambda state: "finish" if state.get("status") in {
+            AgentRunStatus.WAITING_CONFIRMATION.value, AgentRunStatus.CANCELLED.value,
+        } else "agent",
+        {"finish": "finish", "agent": "agent"},
+    )
     graph.add_edge("finish", END)
     compiled = graph.compile()
     completed_initial = sorted(
@@ -386,14 +429,35 @@ def run_langgraph_agent(
             "tool_calls": [],
         }
         persist_graph(initial)
-    elif initial.get("status") == "complete":
-        return session.model_dump(mode="json")
+    else:
+        # Session writes happen before graph snapshots: the durable call ledger
+        # is authoritative after a crash, including when the last graph node
+        # persisted a transient or terminal status.
+        initial["completed_tools"] = completed_initial
+        initial["status"] = ""
+        initial["error"] = None
+    http_client: httpx.Client | None = None
     try:
+        if chat_model is None and cancel_event is not None:
+            http_client = httpx.Client(transport=CancellableModelTransport(
+                cancel_event, settings.insight.timeout_seconds,
+            ))
+            llm = _model(settings, http_client=http_client)
+        else:
+            llm = chat_model or _model(settings)
         compiled.invoke(initial, {"recursion_limit": settings.agent.recursion_limit})
     except Exception as exc:
+        if cancel_event is not None and cancel_event.is_set():
+            session.status = AgentRunStatus.CANCELLED
+            session.error = "Agent execution cancelled"
+            persist()
+            return session.model_dump(mode="json")
         if session.status != AgentRunStatus.FAILED:
             session.status = AgentRunStatus.FAILED
             session.error = str(exc)[-4000:]
             persist()
         raise
+    finally:
+        if http_client is not None:
+            http_client.close()
     return session.model_dump(mode="json")

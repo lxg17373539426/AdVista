@@ -5,8 +5,7 @@ from typing import Any
 
 from pydantic import SecretStr
 
-from ad_vista_agent.config import DatabaseConfig
-from ad_vista_agent.config import load_settings
+from ad_vista_agent.config import DatabaseConfig, load_settings
 from ad_vista_agent.database import Base, Database, RequestRepository
 from ad_vista_agent.web.service import WebService
 
@@ -124,7 +123,7 @@ def test_general_chat_persists_request_when_model_fails(tmp_path: Path, monkeypa
     def fail(*args: Any, **kwargs: Any) -> Any:
         raise TimeoutError("model timeout")
 
-    monkeypatch.setattr("urllib.request.urlopen", fail)
+    monkeypatch.setattr("ad_vista_agent.web.service.cancellable_urlopen", fail)
     try:
         try:
             service.general_chat("测试请求", user_id="system", idempotency_key="chat-failure")
@@ -134,11 +133,69 @@ def test_general_chat_persists_request_when_model_fails(tmp_path: Path, monkeypa
             raise AssertionError("model failure was not propagated")
         with Database(settings.database).session() as session:
             from sqlalchemy import select
+
             from ad_vista_agent.database.models import Request
 
             request = session.scalar(select(Request).where(Request.idempotency_key == "chat-failure"))
             assert request is not None
             assert request.status == "failed"
             assert request.error_code == "model_request_failed"
+    finally:
+        service.close()
+
+
+def test_video_follow_up_creates_user_request_before_answer(tmp_path: Path, monkeypatch) -> None:
+    base = load_settings()
+    settings = base.model_copy(
+        update={
+            "paths": base.paths.model_copy(update={"output_root": tmp_path / "outputs"}),
+            "database": DatabaseConfig(
+                url=SecretStr(f"sqlite+pysqlite:///{tmp_path / 'video-chat.db'}")
+            ),
+        }
+    )
+    database = Database(settings.database)
+    Base.metadata.create_all(database.engine)
+    database.close()
+    service = WebService(settings)
+    state = type(
+        "State",
+        (),
+        {
+            "session_id": "conversation_video",
+            "execution_id": None,
+            "request": type("Request", (), {"goal": "识别产品"})(),
+        },
+    )()
+    monkeypatch.setattr(
+        "ad_vista_agent.web.service.load_agent_session",
+        lambda run_id, current_settings: (tmp_path, tmp_path, state),
+    )
+    repository = service.request_repository
+    assert repository is not None
+
+    def answer(run_id: str, question: str, current_settings: Any, **kwargs: Any) -> dict[str, Any]:
+        assert kwargs["database_request_id"] is not None
+        assert kwargs["database_user_id"] == "system"
+        messages = repository.messages("conversation_video", user_id="system")
+        assert [(item.role, item.content, item.status) for item in messages] == [
+            ("user", "目标人群是谁？", "pending")
+        ]
+        return {"status": "ok", "answer": "高尔夫爱好者。"}
+
+    monkeypatch.setattr("ad_vista_agent.web.service.ask_agent", answer)
+    try:
+        result = service._video_chat(
+            "exec_video",
+            "目标人群是谁？",
+            user_id="system",
+            idempotency_key="video-follow-up",
+        )
+        assert result["answer"] == "高尔夫爱好者。"
+        user_message = repository.messages("conversation_video", user_id="system")[0]
+        assert user_message.request_id is not None
+        request = repository.get_request(user_message.request_id)
+        assert request.idempotency_key == "video-follow-up"
+        assert request.request_type == "video_chat"
     finally:
         service.close()

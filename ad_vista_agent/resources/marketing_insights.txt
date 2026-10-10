@@ -25,6 +25,7 @@ Rules:
 6. If evidence is insufficient, omit the insight and describe the gap in unknowns.
 7. Generate no more than {max_insights_per_dimension} insights per dimension.
 8. Write all user-facing text in Chinese, while preserving brand and product names as shown.
+   When interpreting foreign-language OCR in Chinese, retain a short exact source quote in the claim so readers can check the translation. The quote must support the claim; unrelated words or OCR noise are not evidence for product benefits.
 9. Do not infer gender, age, income, occupation, geography, or other demographic attributes unless the Ledger directly supports them.
 10. Confidence must not exceed 0.85 for any insight.
 12. Unknowns describe missing Ledger evidence, not proven absence from the original video. Each unknown must begin with “当前 Ledger 无证据表明”.

@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 
 from .connection import Database
-from .models import ContextVersion, Conversation, Execution
+from .models import ContextVersion, Conversation, Execution, Request
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class ContextRepository:
@@ -35,8 +35,12 @@ class ContextRepository:
             )
             if conversation is None:
                 raise KeyError(conversation_id)
-            if session.get(Execution, execution_id) is None:
+            execution = session.get(Execution, execution_id)
+            if execution is None:
                 raise KeyError(execution_id)
+            request = session.get(Request, execution.request_id)
+            if request is None or request.conversation_id != conversation_id or request.user_id != conversation.user_id:
+                raise PermissionError("Execution does not belong to the conversation")
             current = session.scalar(
                 select(func.coalesce(func.max(ContextVersion.version), 0)).where(
                     ContextVersion.conversation_id == conversation_id

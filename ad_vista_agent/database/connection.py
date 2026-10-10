@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator
 
-from sqlalchemy import Engine, create_engine, text
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from ad_vista_agent.config import DatabaseConfig
 

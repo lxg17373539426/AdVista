@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy import func
+from sqlalchemy import func, select
 
 from .connection import Database
-from .models import ContextVersion, Execution, Feedback, Request, ToolCall
+from .models import (
+    ContextVersion,
+    Conversation,
+    Execution,
+    Feedback,
+    Message,
+    Request,
+    ToolCall,
+)
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class DiagnosticRepository:
@@ -172,6 +179,20 @@ class DiagnosticRepository:
         if decision not in {"approve", "reject", "revise"}:
             raise ValueError(f"Unsupported feedback decision: {decision}")
         with self.database.session() as session:
+            conversation = session.get(Conversation, conversation_id)
+            if conversation is None or conversation.user_id != user_id:
+                raise PermissionError("Conversation does not belong to the authenticated user")
+            if message_id is not None:
+                message = session.get(Message, message_id)
+                if message is None or message.conversation_id != conversation_id:
+                    raise KeyError(message_id)
+            if execution_id is not None:
+                execution = session.get(Execution, execution_id)
+                if execution is None:
+                    raise KeyError(execution_id)
+                request = session.get(Request, execution.request_id)
+                if request is None or request.conversation_id != conversation_id or request.user_id != user_id:
+                    raise PermissionError("Execution does not belong to the authenticated user")
             session.add(
                 Feedback(
                     feedback_id=feedback_id or f"feedback_{secrets.token_hex(16)}",

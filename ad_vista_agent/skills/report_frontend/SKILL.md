@@ -1,31 +1,68 @@
+---
+name: report-frontend
+description: 定义 AdVista 分析报告前端的确定性渲染契约——版式、分区、证据链呈现与可访问性规则。当系统渲染 report.html / report.md，或需要修改报告版式、新增报告区块、调整报告样式时使用。该技能是供渲染器与维护者读取的设计契约，不用于生成自然语言回答。
+version: "3"
+---
+
 # Report Frontend Skill
 
-## Purpose
+## Role
 
-Turn evidence-grounded advertising analysis into an offline, decision-ready HTML report.
+这是报告前端的**确定性渲染契约**。报告由程序渲染（非模型生成 HTML），本文件定义其版式、信息层级、证据呈现与可访问性要求。任何报告版式改动都必须符合本契约，且变更会使报告缓存失效（`frontend_skill_sha256`）。
 
 ## Design Direction
 
-- Audience: brand, growth, creative, and compliance reviewers.
-- Tone: minimal, light, credible, calm, and scan-friendly.
-- Visual language: white canvas, soft gray borders, charcoal text, and one restrained orange accent.
-- Priority: executive summary, selling points, audit status, then inspectable evidence.
-- Memorable detail: every claim carries a visible audit state and a directly adjacent evidence chain.
+- **Audience**：品牌、增长、创意与合规评审，需要在短时间扫描大量结论。
+- **Tone**：minimal, light, credible, calm, scan-friendly（极简、轻量、可信、克制、易扫读）。
+- **Visual language**：白色 / 纸感画布、柔和灰边框、炭黑正文、单一克制的橙色强调色。
+- **Priority**：可读的分析主题 → 执行摘要 → 核心卖点 → 审计状态与主张性质 → 可展开的证据。
+- **Title**：使用分析主题作为主标题，原始素材名作为次级说明；UUID、内部任务号和洞察 ID 不得成为视觉中心。
+- **Memorable detail**：每条结论都带有可见的审计状态，并紧邻一条可展开的证据链。
 
 ## Rendering Rules
 
-- Keep the HTML self-contained. Do not require external fonts, scripts, images, or CDNs.
-- Preserve every claim, evidence reference, confidence value, audit finding, and evidence gap.
-- Use semantic landmarks and headings in a logical order.
-- Use a quiet sticky desktop contents rail and a horizontally scrollable mobile contents bar.
-- Keep body copy readable, with a maximum line length and clear contrast.
-- Treat selling points as the primary section without hiding other analysis dimensions.
-- Show evidence images in stable aspect-ratio tiles with timestamps and source metadata.
-- Avoid dark hero areas, gradients, glass effects, oversized rounded cards, decorative blobs, heavy shadows, and generic dashboard chrome.
-- Support narrow screens and printable output without horizontal page overflow.
+- HTML 必须自包含：不依赖外部字体、脚本、图片或 CDN。
+- 保留每一条 claim、证据引用、置信度、审计发现与证据缺口，不得因版面省略。
+- 使用语义化 landmark 与有层级的标题（`h1 → h2 → h3`）。
+- 桌面端使用浅色、克制的 sticky 目录侧栏；移动端使用可横向滚动的目录条。
+- 摘要与结论卡片使用白色表面、柔和边框和充足留白，保持摘要、结论、推理与来源的层级。
+- 图片预览必须来自已提供的证据，不得用生成图片替代；使用 `object-fit: contain` 保留完整画面与文字。
+- 正文保持可读行宽与充分对比度。
+- 卖点作为重点章节（`featured`），但不得隐藏其它分析维度。
+- 证据图片放入**固定宽高比**的卡片，附时间戳与来源元数据。
+- 证据链默认可折叠，内部 ID、文件路径与哈希放在次级技术信息中，保留完整引用。
+- `max_evidence_per_insight` 限制首组图片预览，不得丢弃剩余证据；更多证据保留在附加折叠区。
+- 广告主张、直接观察、营销推断与证据不足使用中文标签；推断明确显示待验证。
+- 每条结论的审计发现与全局审计发现均完整保留；warning / error 风险始终展开。info 仅作中性色“来源说明”折叠，不将正常来源说明包装为黄色风险警告；展开和下载均保留原始记录、引用与检查代码。
+- 提供可离线下载的文字报告与证据记录，使用内嵌 data URL，不依赖外部服务。
+- 支持窄屏与打印输出，不产生水平溢出。
+
+## Accessibility
+
+- 状态不仅有颜色，还要有文字标签（通过 / 建议复核 / 失败）。
+- 审计严重度用 `class` + 文本双重表达，不单靠颜色。
+- 打印样式避免在卡片中间断页，展开证据与技术信息；隐藏目录和下载操作，不强制每个章节另起一页。
+- 折叠区使用原生 `details` / `summary`，支持键盘操作；目录、正文和焦点状态清晰可辨。
 
 ## Safety
 
-- Escape all model-generated and source-derived text before inserting it into HTML.
-- Do not emit executable JavaScript.
-- Do not turn unsupported model output into visual certainty.
+- 所有模型生成与来源文本在插入 HTML 前必须转义（`html.escape`）。
+- 不输出任何可执行 JavaScript（不得出现 `<script`）。
+- 不把缺乏支持的模型输出渲染成视觉上的确定性。
+- 审计“通过”表示证据检查通过，不代表独立功效验证；不得改变审计状态、风险等级或人工审批。
+- 模型置信度原值保留，不将其包装成事实正确率。
+
+## Anti-patterns
+
+- ❌ 深色 hero 区、渐变、玻璃拟态、超大圆角卡片、装饰性光斑、重阴影。
+- ❌ 通用仪表盘式堆砌，或与本产品无关的 chart 组件。
+- ❌ 用颜色单独表达审计状态。
+- ❌ 为保证“好看”而删除证据或审计发现。
+
+## Self-check
+
+- [ ] 无外部资源依赖，无 `<script`。
+- [ ] 所有动态文本已转义。
+- [ ] 卖点为 `featured`，其它维度未被隐藏。
+- [ ] 移动端与打印样式均无水平溢出。
+- [ ] 状态同时具备文字与颜色表达。

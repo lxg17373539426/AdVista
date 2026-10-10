@@ -9,7 +9,6 @@ from ad_vista_agent.database import (
     Base,
     Database,
     DiagnosticRepository,
-    DiagnosticRepository,
     ExecutionRepository,
     RequestRepository,
 )

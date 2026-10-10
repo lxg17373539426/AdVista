@@ -16,6 +16,10 @@ class GroundingError(AdVistaError):
     code = "grounding_failed"
 
 
+class AnalysisGroundingError(GroundingError, ValueError):
+    """Rejected analysis; retain the existing ValueError validation contract."""
+
+
 class ToolError(AdVistaError):
     code = "tool_failed"
 
@@ -31,3 +35,11 @@ class ModelTimeoutError(ModelUnavailableError):
 class InvalidVideoError(AdVistaError):
     code = "invalid_video"
     retryable = False
+
+
+class JobCapacityError(AdVistaError):
+    code = "job_capacity_exceeded"
+
+
+class ConversationBusyError(AdVistaError):
+    code = "conversation_busy"

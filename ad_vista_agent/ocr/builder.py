@@ -24,7 +24,6 @@ from ad_vista_agent.tools import OcrWorkerTool, ToolContext
 from .parse import ocr_quality_flags, parse_deepseek_grounding
 from .quality import build_ocr_quality_report
 
-
 DEEPSEEK_VERSIONS = {
     "torch": "2.6.0+cu124",
     "transformers": "4.46.3",
@@ -188,15 +187,15 @@ def build_ocr(video_path: Path, settings: Settings, *, force: bool = False) -> d
         metrics = store.read_json(metrics_path)
         if metrics.get("cache_key") == cache_key:
             frames = _load_frame_results(raw_path)
-            evidence = _load_evidence(evidence_path)
-            _validate_evidence(evidence, keyframes)
+            cached_evidence = _load_evidence(evidence_path)
+            _validate_evidence(cached_evidence, keyframes)
             return {
                 "status": "ok",
                 "cache_hit": True,
                 "run_id": run_id,
                 "run_dir": str(run_dir),
                 "frame_count": len(frames),
-                "evidence_count": len(evidence),
+                "evidence_count": len(cached_evidence),
                 "cache_key": cache_key,
             }
 
@@ -220,31 +219,31 @@ def build_ocr(video_path: Path, settings: Settings, *, force: bool = False) -> d
     store.write_jsonl(raw_path, frame_results)
     evidence: list[Evidence] = []
     evidence_index = 0
-    for frame in frame_results:
-        for region in frame.regions:
+    for frame_result in frame_results:
+        for region in frame_result.regions:
             evidence_index += 1
             evidence.append(
                 Evidence(
                     evidence_id=f"ocr_{evidence_index:04d}",
                     asset_id=asset.asset_id,
                     modality=EvidenceModality.OCR,
-                    start_ms=frame.timestamp_ms,
-                    end_ms=frame.timestamp_ms,
+                    start_ms=frame_result.timestamp_ms,
+                    end_ms=frame_result.timestamp_ms,
                     content=region.text,
                     confidence=region.confidence,
                     epistemic_status=EpistemicStatus.OBSERVED,
-                    tool=frame.backend,
+                    tool=frame_result.backend,
                     model_version="DeepSeek-OCR",
-                    artifact_path=Path(frame.frame_path),
+                    artifact_path=Path(frame_result.frame_path),
                     artifact_hash=next(
                         item.artifact_sha256
                         for item in keyframes
-                        if item.keyframe_id == frame.keyframe_id
+                        if item.keyframe_id == frame_result.keyframe_id
                     ),
                     region=region.region,
                     metadata={
-                        "keyframe_id": frame.keyframe_id,
-                        "shot_id": frame.shot_id,
+                        "keyframe_id": frame_result.keyframe_id,
+                        "shot_id": frame_result.shot_id,
                         "label": region.label,
                         "quality_flags": ocr_quality_flags(region.text),
                         "backend_versions": DEEPSEEK_VERSIONS,

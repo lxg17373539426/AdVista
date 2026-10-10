@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import urllib.error
 import urllib.request
+from datetime import UTC
 from pathlib import Path
 from typing import Annotated
 
@@ -17,12 +18,12 @@ from .agent import (
     ask_agent,
     build_agent_registry,
     qwen_plan,
+    record_feedback,
     resume_agent,
     resume_pipeline,
     rule_plan,
     run_agent,
     run_pipeline,
-    record_feedback,
     show_conversation,
 )
 from .config import DEFAULT_CONFIG, load_settings
@@ -35,9 +36,8 @@ from .ocr.builder import build_ocr
 from .ocr.quality import build_ocr_quality_report
 from .reports.builder import build_report
 from .schemas import AgentRequest
-from .timeline.builder import build_timeline
 from .speech.builder import build_speech
-
+from .timeline.builder import build_timeline
 
 app = typer.Typer(
     name="advista-agent",
@@ -171,7 +171,7 @@ def timeline(
     min_shot_ms: Annotated[int | None, typer.Option("--min-shot-ms")] = None,
     force: Annotated[bool, typer.Option("--force")] = False,
 ) -> None:
-    """Build a normalized shot timeline and one primary keyframe per shot."""
+    """Build a normalized shot timeline and adaptive keyframes per shot."""
     try:
         settings = load_settings(config)
         overrides = {}
@@ -661,7 +661,8 @@ def quality_report(
     """Write a redacted execution quality report suitable for cron jobs."""
     database = None
     try:
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         from .database import Database, DiagnosticRepository
         from .runtime import ArtifactStore
 
@@ -671,7 +672,7 @@ def quality_report(
         database = Database(settings.database)
         database.check()
         diagnostics = DiagnosticRepository(database)
-        generated_at = datetime.now(timezone.utc).isoformat()
+        generated_at = datetime.now(UTC).isoformat()
         payload = {
             "schema_version": "1",
             "generated_at": generated_at,

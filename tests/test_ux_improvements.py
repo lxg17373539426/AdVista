@@ -8,7 +8,6 @@ from ad_vista_agent.config import DatabaseConfig
 from ad_vista_agent.database import Base, Database, RequestRepository
 from ad_vista_agent.web.service import WebService
 
-
 STATIC = Path(__file__).resolve().parents[1] / "ad_vista_agent" / "web" / "static"
 
 
@@ -129,17 +128,19 @@ def test_frontend_exposes_evidence_status_and_removes_duplicate_context_bar() ->
     assert "请输入问题" in script
 
 
-def test_frontend_groups_history_and_filters() -> None:
+def test_frontend_keeps_each_conversation_accessible_and_filters() -> None:
     script = (STATIC / "app.js").read_text(encoding="utf-8")
     html = (STATIC / "index.html").read_text(encoding="utf-8")
 
-    assert "function groupRuns" in script
+    assert "function groupRuns" not in script
     assert "function renderRuns" in script
     assert "run-search" in html
     assert 'data-filter="failed"' in html
     assert 'data-filter="report"' in html
-    assert "run.deliverables" in script
-    assert 'String(run.goal||"视频分析")' in script
+    assert 'data-run="${esc(run.run_id)}"' in script
+    assert 'run.title||' in script
+    assert 'data-rename=' in script
+    assert "run.title||\"\"" in script
     assert '.run-goal { display: none' not in (STATIC / "styles.css").read_text(encoding="utf-8")
 
 

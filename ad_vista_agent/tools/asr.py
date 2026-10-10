@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ad_vista_agent.runtime.process import ProcessCancelled, run_process
 from ad_vista_agent.schemas.speech import TranscriptSegment
 
 from .base import Tool, ToolContext
-from ad_vista_agent.runtime.process import ProcessCancelled, run_process
 
 
 @dataclass(frozen=True)

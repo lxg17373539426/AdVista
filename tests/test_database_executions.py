@@ -5,7 +5,12 @@ from pathlib import Path
 from pydantic import SecretStr
 
 from ad_vista_agent.config import DatabaseConfig
-from ad_vista_agent.database import Base, Database, ExecutionRepository, RequestRepository
+from ad_vista_agent.database import (
+    Base,
+    Database,
+    ExecutionRepository,
+    RequestRepository,
+)
 
 
 def test_execution_and_tool_calls_are_queryable(tmp_path: Path) -> None:

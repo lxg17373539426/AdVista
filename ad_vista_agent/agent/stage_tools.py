@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, ClassVar
 
 from ad_vista_agent.config import Settings
 from ad_vista_agent.creative.builder import build_creative
@@ -10,24 +11,23 @@ from ad_vista_agent.insights.builder import build_insights
 from ad_vista_agent.ledger.builder import build_ledger
 from ad_vista_agent.ocr.builder import build_ocr
 from ad_vista_agent.reports.builder import build_report
+from ad_vista_agent.schemas import AgentRequest
 from ad_vista_agent.speech.builder import build_speech
 from ad_vista_agent.strategy.builder import build_strategy
 from ad_vista_agent.timeline.builder import build_timeline
-from ad_vista_agent.schemas import AgentRequest
 from ad_vista_agent.tools import Tool, ToolContext, ToolRegistry
 from ad_vista_agent.tools.base import reset_active_cancel_event, set_active_cancel_event
-
 
 Builder = Callable[[Path, Settings, bool, AgentRequest | None, Path | None], dict[str, Any]]
 
 
 class StageTool(Tool):
-    input_schema = {
+    input_schema: ClassVar[dict[str, Any]] = {
         "type": "object",
         "properties": {"force": {"type": "boolean"}},
         "additionalProperties": False,
     }
-    output_schema = {"type": "object", "required": ["status", "run_id", "run_dir"]}
+    output_schema: ClassVar[dict[str, Any]] = {"type": "object", "required": ["status", "run_id", "run_dir"]}
 
     def __init__(
         self,

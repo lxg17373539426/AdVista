@@ -6,7 +6,6 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "resources" / "default.yaml"
 
@@ -33,7 +32,7 @@ class HardwareConfig(BaseModel):
     max_gpus: int = Field(default=1, ge=1)
 
     @model_validator(mode="after")
-    def enforce_gpu_limit(self) -> "HardwareConfig":
+    def enforce_gpu_limit(self) -> HardwareConfig:
         devices = [item.strip() for item in self.cuda_visible_devices.split(",") if item.strip()]
         if len(devices) > self.max_gpus:
             raise ValueError("cuda_visible_devices exceeds max_gpus")
@@ -65,6 +64,14 @@ class TimelineConfig(BaseModel):
     min_shot_ms: int = Field(default=500, gt=0)
     frame_format: str = Field(default="jpg", pattern=r"^jpg$")
     jpeg_quality: int = Field(default=2, ge=1, le=31)
+    keyframe_middle_min_shot_ms: int = Field(default=1500, gt=0)
+    keyframe_end_min_shot_ms: int = Field(default=3000, gt=0)
+    max_keyframes_per_shot: int = Field(default=3, ge=1, le=8)
+    visual_change_enabled: bool = True
+    visual_change_interval_ms: int = Field(default=1000, gt=0)
+    visual_change_threshold: float = Field(default=0.18, gt=0, le=1)
+    visual_change_width: int = Field(default=64, gt=0)
+    visual_change_height: int = Field(default=36, gt=0)
 
 
 class AsrConfig(BaseModel):
@@ -148,7 +155,7 @@ class WebConfig(BaseModel):
     api_requests_per_minute: int = Field(default=120, ge=1)
 
     @model_validator(mode="after")
-    def require_token_for_remote_host(self) -> "WebConfig":
+    def require_token_for_remote_host(self) -> WebConfig:
         if self.host not in {"127.0.0.1", "localhost", "::1"} and not self.api_token:
             raise ValueError("web.api_token is required when web.host is not local")
         return self
@@ -201,7 +208,7 @@ def load_settings(config_path: Path = DEFAULT_CONFIG) -> Settings:
     with config_path.expanduser().resolve().open(encoding="utf-8") as handle:
         value = yaml.safe_load(handle)
     if not isinstance(value, dict):
-        raise ValueError(f"Configuration must be a YAML object: {config_path}")
+        raise ValueError(f"Configuration must be a YAML object: {config_path}")  # noqa: TRY004 — 保留对文件内容验证的 ValueError 契约。
     database_url = os.environ.get("ADVISTA_DATABASE_URL")
     if database_url:
         database = value.get("database")

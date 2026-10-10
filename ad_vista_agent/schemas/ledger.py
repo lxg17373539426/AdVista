@@ -26,7 +26,7 @@ class EvidenceCluster(BaseModel):
     confidence: float | None = Field(default=None, ge=0, le=1)
 
     @model_validator(mode="after")
-    def validate_cluster(self) -> "EvidenceCluster":
+    def validate_cluster(self) -> EvidenceCluster:
         if self.end_ms < self.start_ms:
             raise ValueError("Cluster end_ms must be greater than or equal to start_ms")
         if self.representative_evidence_id not in self.member_evidence_ids:
@@ -47,7 +47,7 @@ class EvidenceRelation(BaseModel):
     reason: str
 
     @model_validator(mode="after")
-    def validate_relation(self) -> "EvidenceRelation":
+    def validate_relation(self) -> EvidenceRelation:
         if self.left_evidence_id == self.right_evidence_id:
             raise ValueError("A relation must connect different evidence")
         return self
@@ -67,7 +67,7 @@ class EvidenceLedger(BaseModel):
     configuration: dict[str, object]
 
     @model_validator(mode="after")
-    def validate_counts(self) -> "EvidenceLedger":
+    def validate_counts(self) -> EvidenceLedger:
         if self.source_evidence_count != len(self.ordered_evidence_ids):
             raise ValueError("source_evidence_count must match ordered evidence IDs")
         if len(set(self.ordered_evidence_ids)) != len(self.ordered_evidence_ids):

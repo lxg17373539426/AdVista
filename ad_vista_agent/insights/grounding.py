@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from collections import Counter
 import re
+from collections import Counter
 
+from ad_vista_agent.errors import AnalysisGroundingError
 from ad_vista_agent.schemas import MarketingAnalysis, MarketingDimension
-
 
 SUMMARY_ORDER = (
     MarketingDimension.CREATIVE_STRUCTURE,
@@ -45,15 +45,17 @@ def normalize_ocr_cluster_references(
     Models sometimes use an OCR evidence ID (``ocr_0024``) or derive a
     cluster ID from that evidence number (``ocr_cluster_0024``). Both are
     safe to repair only when the current Ledger explicitly maps the member
-    evidence to a cluster. Unknown IDs remain unchanged and are rejected by
-    the normal grounding validator.
+    evidence to a cluster. Existing cluster IDs take precedence: their number
+    is independent of member evidence numbers. Unknown IDs remain unchanged
+    and are rejected by the normal grounding validator.
     """
+    cluster_ids = set(evidence_to_cluster.values())
     normalized = []
     for item in analysis.insights:
         references = []
         for reference in item.evidence_refs:
             candidate = reference
-            if OCR_REFERENCE_PATTERN.fullmatch(reference):
+            if reference not in cluster_ids and OCR_REFERENCE_PATTERN.fullmatch(reference):
                 evidence_id = reference.replace("ocr_cluster_", "ocr_", 1)
                 candidate = evidence_to_cluster.get(evidence_id, reference)
             if candidate not in references:
@@ -82,25 +84,25 @@ def validate_analysis_grounding(
     reference_content: dict[str, str] | None = None,
 ) -> None:
     if analysis.asset_id != asset_id:
-        raise ValueError("Marketing analysis belongs to another asset")
+        raise AnalysisGroundingError("Marketing analysis belongs to another asset")
     insight_ids = [item.insight_id for item in analysis.insights]
     if len(insight_ids) != len(set(insight_ids)):
-        raise ValueError("Marketing insight IDs must be unique")
+        raise AnalysisGroundingError("Marketing insight IDs must be unique")
     counts = Counter(item.dimension for item in analysis.insights)
     excessive = [dimension.value for dimension, count in counts.items() if count > max_per_dimension]
     if excessive:
-        raise ValueError(f"Too many insights for dimensions: {sorted(excessive)}")
+        raise AnalysisGroundingError(f"Too many insights for dimensions: {sorted(excessive)}")
     for item in analysis.insights:
         if item.dimension == MarketingDimension.AUDIENCE and any(
             term in (item.claim + " " + item.reasoning_summary)
             for term in ("真实性别", "跨性别", "性别流动")
         ):
-            raise ValueError(
+            raise AnalysisGroundingError(
                 f"Insight {item.insight_id} infers a person's gender identity from advertising evidence"
             )
         unknown = set(item.evidence_refs) - allowed_references
         if unknown:
-            raise ValueError(
+            raise AnalysisGroundingError(
                 f"Insight {item.insight_id} cites unknown evidence: {sorted(unknown)}"
             )
         if not _claim_has_source_overlap(
@@ -109,16 +111,16 @@ def validate_analysis_grounding(
             allowed_references,
             reference_content or {},
         ):
-            raise ValueError(
+            raise AnalysisGroundingError(
                 f"Insight {item.insight_id} cites evidence with no obvious lexical support"
             )
         mentioned = set(INLINE_CITATION_PATTERN.findall(item.claim + " " + item.reasoning_summary))
         if mentioned:
-            raise ValueError(
+            raise AnalysisGroundingError(
                 f"Insight {item.insight_id} writes citation IDs outside evidence_refs: {sorted(mentioned)}"
             )
     if any(not value.startswith("当前 Ledger 无证据表明") for value in analysis.unknowns):
-        raise ValueError("Each unknown must state that the current Ledger lacks evidence")
+        raise AnalysisGroundingError("Each unknown must state that the current Ledger lacks evidence")
 
 
 def _claim_terms(value: str) -> set[str]:

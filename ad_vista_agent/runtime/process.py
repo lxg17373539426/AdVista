@@ -13,18 +13,18 @@ class ProcessCancelled(RuntimeError):
 
 
 def _terminate_group(process: subprocess.Popen[str]) -> None:
-    if process.poll() is not None:
-        return
     try:
         os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=5)
+        # The group leader may already have exited while descendants retain
+        # our stdout/stderr pipes. Wait for pipe closure, not only the leader.
+        process.communicate(timeout=5)
     except (ProcessLookupError, subprocess.TimeoutExpired):
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         try:
-            process.wait(timeout=5)
+            process.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             pass
 
@@ -64,6 +64,5 @@ def run_process(
             except subprocess.TimeoutExpired:
                 continue
     except BaseException:
-        if process.poll() is None:
-            _terminate_group(process)
+        _terminate_group(process)
         raise

@@ -14,19 +14,21 @@ from ad_vista_agent.ingestion import ingest_video
 from ad_vista_agent.runtime import ArtifactStore, sha256_file
 from ad_vista_agent.runtime.stage_cache import stage_cache_key
 from ad_vista_agent.schemas import (
+    AdAsset,
     AgentRequest,
     CriticAudit,
     Evidence,
     EvidenceCluster,
     Keyframe,
     MarketingAnalysis,
-    AdAsset,
 )
-from ad_vista_agent.skills import REPORT_FRONTEND_SKILL, report_frontend_skill_fingerprint
+from ad_vista_agent.skills import (
+    REPORT_FRONTEND_SKILL,
+    report_frontend_skill_fingerprint,
+)
 
 from .critic import audit_analysis
 from .render import render_html_report, render_markdown_report
-
 
 REPORT_PIPELINE_VERSION = "7"
 ModelT = TypeVar("ModelT", bound=BaseModel)
@@ -68,7 +70,7 @@ def _validate_cached_deliverables(
         raise ValueError("Cached report deliverables are missing")
     hashes = metrics.get("deliverable_sha256")
     if not isinstance(hashes, dict):
-        raise ValueError("Cached report metrics have no deliverable hashes")
+        raise ValueError("Cached report metrics have no deliverable hashes")  # noqa: TRY004 — 保留对文件内容验证的 ValueError 契约。
     if hashes.get("markdown") != sha256_file(markdown_path):
         raise ValueError("Cached Markdown report hash mismatch")
     if hashes.get("html") != sha256_file(html_path):
@@ -219,7 +221,7 @@ def build_report(
     )
     stages_value = manifest.setdefault("stages", {})
     if not isinstance(stages_value, dict):
-        raise ValueError("Manifest stages must be an object")
+        raise ValueError("Manifest stages must be an object")  # noqa: TRY004 — 保留对文件内容验证的 ValueError 契约。
     stages: dict[str, Any] = stages_value
     stages["stage_7_report"] = {
         "cache_key": cache_key,

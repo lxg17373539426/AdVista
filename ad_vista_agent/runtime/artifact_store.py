@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import uuid
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Iterator
-
-import fcntl
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -68,7 +68,7 @@ class ArtifactStore:
         with path.open(encoding="utf-8") as handle:
             value = json.load(handle)
         if not isinstance(value, dict):
-            raise ValueError(f"Expected JSON object: {path}")
+            raise ValueError(f"Expected JSON object: {path}")  # noqa: TRY004 — 保留对文件内容验证的 ValueError 契约。
         return value
 
     def write_jsonl(self, path: Path, values: Iterable[BaseModel | dict[str, Any]]) -> None:

@@ -5,19 +5,21 @@ import mimetypes
 import os
 import re
 import secrets
+import signal
 import threading
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from types import FrameType
+from typing import Any, ClassVar
 from urllib.parse import parse_qs, urlparse
 
 from ad_vista_agent.config import DEFAULT_CONFIG, Settings, load_settings
+from ad_vista_agent.errors import ConversationBusyError, JobCapacityError
 from ad_vista_agent.ingestion import SUPPORTED_SUFFIXES
 
 from .service import WebService
-
 
 EXPORTS = {
     "evidence-html": ("ledger/evidence.html", "text/html; charset=utf-8"),
@@ -51,11 +53,13 @@ def _contained(root: Path, relative: str) -> Path:
 
 def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, object]:
     length = int(handler.headers.get("Content-Length", "0"))
+    if length <= 0:
+        raise ValueError("JSON request length must be positive")
     if length > 1_000_000:
         raise ValueError("JSON request is too large")
     value = json.loads(handler.rfile.read(length).decode("utf-8"))
     if not isinstance(value, dict):
-        raise ValueError("JSON body must be an object")
+        raise ValueError("JSON body must be an object")  # noqa: TRY004 — 保留请求内容验证的 ValueError 契约。
     return value
 
 
@@ -67,7 +71,7 @@ class _MultipartReader:
 
     def _fill(self) -> None:
         if self.remaining <= 0:
-            return
+            raise ValueError("Upload ended before multipart body completed")
         chunk = self.stream.read(min(1024 * 1024, self.remaining))
         if not chunk:
             raise ValueError("Upload ended before multipart body completed")
@@ -76,8 +80,12 @@ class _MultipartReader:
 
     def readline(self) -> bytes:
         while b"\n" not in self.buffer:
+            if len(self.buffer) > 65536:
+                raise ValueError("Multipart header is too large")
             self._fill()
         index = self.buffer.index(10) + 1
+        if index > 65536:
+            raise ValueError("Multipart header is too large")
         value = bytes(self.buffer[:index])
         del self.buffer[:index]
         return value
@@ -123,8 +131,12 @@ class _MultipartReader:
 
 def _multipart_headers(reader: _MultipartReader) -> tuple[str, str | None]:
     headers: dict[str, str] = {}
+    header_bytes = 0
     while True:
         line = reader.readline()
+        header_bytes += len(line)
+        if header_bytes > 65536:
+            raise ValueError("Multipart headers are too large")
         if line in {b"\r\n", b"\n"}:
             break
         name, _, value = line.decode("utf-8", errors="replace").partition(":")
@@ -143,7 +155,7 @@ class _Handler(BaseHTTPRequestHandler):
     settings: Settings
     static_root = Path(__file__).parent / "static"
     _rate_lock = threading.RLock()
-    _rate_windows: dict[str, list[float]] = {}
+    _rate_windows: ClassVar[dict[str, list[float]]] = {}
 
     def _identity(self) -> dict[str, str] | None:
         return getattr(self, "identity", None)
@@ -281,7 +293,13 @@ class _Handler(BaseHTTPRequestHandler):
                 )})
             if parts == ["api", "chat", "messages"]:
                 session_id = query.get("session_id", [""])[0]
-                return self._send_json(self.service.general_messages(session_id))
+                return self._send_json(self.service.general_messages(
+                    session_id, user_id=(self._identity() or {}).get("user_id"),
+                ))
+            if parts == ["api", "conversations"]:
+                return self._send_json({"conversations": self.service.conversations(
+                    user_id=(self._identity() or {}).get("user_id"),
+                )})
             if parts == ["api", "admin", "executions"]:
                 if not self._require_admin():
                     return
@@ -377,7 +395,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(403, str(exc))
         except (ValueError, json.JSONDecodeError) as exc:
             self._error(400, str(exc))
-        except Exception as exc:
+        except Exception:  # noqa: BLE001 — HTTP 边界统一输出脱敏错误，保留异常兜底。
             self._error(500, "服务暂时无法完成请求，请稍后重试。")
 
     def _artifact_json(self, run_dir: Path, relative: str) -> None:
@@ -412,6 +430,27 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             if parts == ["api", "uploads"]:
                 return self._upload()
+            if len(parts) in {4, 5} and parts[:2] == ["api", "conversations"] and parts[3:] in (["title"], ["title", "generate"]):
+                body = _read_json(self)
+                owner = (self._identity() or {}).get("user_id")
+                if parts[3:] == ["title", "generate"]:
+                    result = self.service.generate_conversation_title(parts[2], user_id=owner)
+                else:
+                    result = self.service.rename_conversation(parts[2], body.get("title"), user_id=owner)
+                return self._send_json(result)
+            if len(parts) in {4, 5} and parts[:2] == ["api", "runs"] and parts[3:] in (["title"], ["title", "generate"]):
+                run_id = parts[2]
+                if not _safe_run_id(run_id):
+                    return self._error(400, "Invalid run ID")
+                identity = self._identity()
+                owner = identity.get("user_id") if identity else None
+                self.service.authorize_run(run_id, user_id=owner, is_admin=bool(identity and identity.get("role") == "admin"))
+                body = _read_json(self)
+                if parts[3:] == ["title", "generate"]:
+                    result = self.service.generate_run_title(run_id, user_id=owner)
+                else:
+                    result = self.service.rename_run(run_id, body.get("title"), user_id=owner)
+                return self._send_json(result)
             if parts == ["api", "chat"]:
                 body = _read_json(self)
                 return self._send_json(
@@ -424,6 +463,10 @@ class _Handler(BaseHTTPRequestHandler):
                 )
             if parts == ["api", "chat", "stream"]:
                 body = _read_json(self)
+                if body.get("session_id"):
+                    self.service.authorize_conversation(
+                        str(body["session_id"]), user_id=(self._identity() or {}).get("user_id"), allow_missing=True,
+                    )
                 self.send_response(200)
                 self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
@@ -437,7 +480,7 @@ class _Handler(BaseHTTPRequestHandler):
                         user_id=(self._identity() or {}).get("user_id"),
                         idempotency_key=self._idempotency_key(),
                     )
-                except Exception as exc:
+                except Exception:  # noqa: BLE001 — HTTP 边界统一输出脱敏错误，保留异常兜底。
                     self._stream_event(
                         {
                             "type": "error",
@@ -470,8 +513,10 @@ class _Handler(BaseHTTPRequestHandler):
                         run_id,
                         str(body.get("question", "")),
                         lambda value: self._stream_event({"type": "delta", "text": value}),
+                        user_id=identity.get("user_id") if identity else None,
+                        idempotency_key=self._idempotency_key(),
                     )
-                except Exception as exc:
+                except Exception:  # noqa: BLE001 — HTTP 边界统一输出脱敏错误，保留异常兜底。
                     self._stream_event(
                         {
                             "type": "error",
@@ -515,7 +560,12 @@ class _Handler(BaseHTTPRequestHandler):
                 )
                 if parts[3] == "messages":
                     body = _read_json(self)
-                    return self._send_json(self.service.chat(run_id, str(body.get("question", ""))))
+                    return self._send_json(self.service.chat(
+                        run_id,
+                        str(body.get("question", "")),
+                        user_id=identity.get("user_id") if identity else None,
+                        idempotency_key=self._idempotency_key(),
+                    ))
                 if parts[3] == "feedback":
                     return self._send_json(
                         self.service.feedback(
@@ -538,9 +588,13 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(404, "Not found")
         except (FileNotFoundError, KeyError):
             self._error(404, "Run or artifact not found")
+        except PermissionError as exc:
+            self._error(403, str(exc))
+        except JobCapacityError as exc:
+            self._error(HTTPStatus.TOO_MANY_REQUESTS, str(exc))
         except (ValueError, json.JSONDecodeError) as exc:
             self._error(400, str(exc))
-        except Exception as exc:
+        except Exception:  # noqa: BLE001 — HTTP 边界统一输出脱敏错误，保留异常兜底。
             self._error(500, "服务暂时无法完成请求，请稍后重试。")
 
     def do_DELETE(self) -> None:
@@ -548,6 +602,16 @@ class _Handler(BaseHTTPRequestHandler):
             parts, _ = self._route()
             if not self._require_api_access(parts):
                 return
+            if parts[:2] == ["api", "conversations"] and len(parts) == 3:
+                return self._send_json(self.service.delete_conversation(
+                    parts[2], user_id=(self._identity() or {}).get("user_id"),
+                ))
+            if parts[:2] == ["api", "runs"] and len(parts) == 3:
+                if not _safe_run_id(parts[2]):
+                    return self._error(400, "Invalid run ID")
+                return self._send_json(self.service.delete_run(
+                    parts[2], user_id=(self._identity() or {}).get("user_id"),
+                ))
             if parts[0:2] == ["api", "jobs"] and len(parts) == 3:
                 identity = self._identity()
                 return self._send_json(self.service.cancel_job(
@@ -558,20 +622,28 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(404, "Not found")
         except PermissionError as exc:
             self._error(403, str(exc))
-        except KeyError:
-            self._error(404, "Job not found")
-        except Exception as exc:
-            self._error(500, "任务状态暂时无法读取，请稍后重试。")
+        except ConversationBusyError as exc:
+            self._error(409, str(exc))
+        except (FileNotFoundError, KeyError):
+            self._error(404, "会话不存在或已删除。" if parts[:2] in (["api", "conversations"], ["api", "runs"]) else "Job not found")
+        except ValueError as exc:
+            self._error(400, str(exc))
+        except Exception:  # noqa: BLE001 — HTTP 边界统一输出脱敏错误，保留异常兜底。
+            self._error(500, "会话暂时无法删除，请稍后重试。" if parts[:2] in (["api", "conversations"], ["api", "runs"]) else "任务状态暂时无法读取，请稍后重试。")
 
     def _upload(self) -> None:
         content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length <= 0:
+            raise ValueError("Upload request length must be positive")
         if content_length > self.settings.web.max_upload_bytes + 2_000_000:
             raise ValueError("Upload exceeds configured size limit")
-        if not self.headers.get_content_type().startswith("multipart/"):
+        if self.headers.get_content_type() != "multipart/form-data":
             raise ValueError("Upload must use multipart/form-data")
-        boundary = str(self.headers.get_param("boundary"))
-        if not boundary:
+        boundary = self.headers.get_param("boundary")
+        if not isinstance(boundary, str) or not boundary:
             raise ValueError("Missing multipart boundary")
+        if len(boundary) > 70 or any(ord(char) < 32 or ord(char) > 126 for char in boundary):
+            raise ValueError("Invalid multipart boundary")
         target_dir = self.settings.paths.output_root / "uploads"
         target_dir.mkdir(parents=True, exist_ok=True)
         reader = _MultipartReader(self.rfile, content_length)
@@ -583,10 +655,17 @@ class _Handler(BaseHTTPRequestHandler):
         target: Path | None = None
         temporary: Path | None = None
         display_name = ""
+        part_count = 0
+        field_bytes = 0
         try:
             while True:
+                part_count += 1
+                if part_count > 32:
+                    raise ValueError("Too many multipart fields")
                 name, filename = _multipart_headers(reader)
                 if name == "video":
+                    if target is not None:
+                        raise ValueError("Only one video upload is allowed")
                     if not filename:
                         raise ValueError("Missing video upload")
                     suffix = Path(filename).suffix.casefold()
@@ -609,8 +688,9 @@ class _Handler(BaseHTTPRequestHandler):
                     _, final = reader.body_until(
                         boundary_bytes,
                         value.extend,
-                        1_000_000,
+                        1_000_000 - field_bytes,
                     )
+                    field_bytes += len(value)
                     fields[name] = bytes(value)
                 if final:
                     break
@@ -626,7 +706,7 @@ class _Handler(BaseHTTPRequestHandler):
             raise
         target.with_suffix(target.suffix + ".name").write_text(display_name, encoding="utf-8")
         try:
-            goal = fields.get("goal", "分析这个广告视频".encode("utf-8")).decode(
+            goal = fields.get("goal", "分析这个广告视频".encode()).decode(
                 "utf-8", errors="replace"
             )
             mode = fields.get("mode", b"quick").decode("utf-8", errors="replace")
@@ -672,9 +752,34 @@ def create_server(settings: Settings | None = None) -> ThreadingHTTPServer:
 
 def serve(settings: Settings | None = None) -> None:
     server = create_server(settings)
+    previous: dict[signal.Signals, Any] = {}
+    shutting_down = False
+
+    def request_shutdown(signum: int, _frame: FrameType | None) -> None:
+        nonlocal shutting_down
+        if shutting_down:
+            return
+        shutting_down = True
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt
+        raise SystemExit(0)
+
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous[signum] = signal.getsignal(signum)
+            signal.signal(signum, request_shutdown)
     try:
-        print(f"AdVista Web listening on http://{server.server_address[0]}:{server.server_address[1]}")
+        address = server.server_address[0]
+        host = address.decode() if isinstance(address, bytes) else address
+        print(f"AdVista Web listening on http://{host}:{server.server_address[1]}")
         server.serve_forever()
     finally:
-        server.service.close()  # type: ignore[attr-defined]
-        server.server_close()
+        shutting_down = True
+        try:
+            server.service.close()  # type: ignore[attr-defined]
+        finally:
+            try:
+                server.server_close()
+            finally:
+                for signum, handler in previous.items():
+                    signal.signal(signum, handler)

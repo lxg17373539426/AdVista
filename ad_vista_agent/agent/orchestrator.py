@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,10 +13,14 @@ from ad_vista_agent.ledger.builder import build_ledger
 from ad_vista_agent.ocr.builder import build_ocr
 from ad_vista_agent.reports.builder import build_report
 from ad_vista_agent.runtime import ArtifactStore
-from ad_vista_agent.schemas import PipelineStageState, PipelineState, PipelineStatus, StepStatus
+from ad_vista_agent.schemas import (
+    PipelineStageState,
+    PipelineState,
+    PipelineStatus,
+    StepStatus,
+)
 from ad_vista_agent.speech.builder import build_speech
 from ad_vista_agent.timeline.builder import build_timeline
-
 
 PIPELINE_VERSION = "1"
 PIPELINE_STAGE_NAMES = ("ingest", "timeline", "speech", "ocr", "ledger", "insights", "report")
@@ -24,7 +28,7 @@ StageRunner = Callable[[Path, Settings, bool], dict[str, Any]]
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _ingest(video: Path, settings: Settings, force: bool) -> dict[str, Any]:
@@ -270,6 +274,8 @@ def resume_pipeline(
     _validate_stage_names(force)
 
     with store.lock(f"pipeline_{run_id}"):
+        # A previous caller may have advanced the pipeline while we waited.
+        run_dir, state = _load_state(store, run_id)
         if approve_review:
             if state.status != PipelineStatus.WAITING_CONFIRMATION or state.audit_status != "review":
                 raise ValueError("Review approval is only valid for a waiting review pipeline")

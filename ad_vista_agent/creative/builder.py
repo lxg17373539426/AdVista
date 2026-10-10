@@ -12,7 +12,11 @@ from pydantic import BaseModel
 from ad_vista_agent.config import Settings
 from ad_vista_agent.context import build_context_budget, compress_evidence_context
 from ad_vista_agent.ingestion import ingest_video
-from ad_vista_agent.insights.builder import _extract_json, _load_jsonl, _runtime_model_identity
+from ad_vista_agent.insights.builder import (
+    _extract_json,
+    _load_jsonl,
+    _runtime_model_identity,
+)
 from ad_vista_agent.insights.payload import build_ledger_payload
 from ad_vista_agent.runtime import ArtifactStore, sha256_file
 from ad_vista_agent.runtime.stage_cache import stage_cache_key
@@ -25,11 +29,10 @@ from ad_vista_agent.schemas import (
     EvidenceRelation,
     MarketingAnalysis,
 )
-from ad_vista_agent.tools import QwenInsightTool, ToolContext
 from ad_vista_agent.skills import task_skill_prompt
+from ad_vista_agent.tools import QwenInsightTool, ToolContext
 
-
-CREATIVE_PIPELINE_VERSION = "2"
+CREATIVE_PIPELINE_VERSION = "3"
 QWEN_VERSIONS = {"vllm": "0.19.1", "torch": "2.10.0", "transformers": "5.13.0"}
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -208,7 +211,7 @@ def build_creative(
             "output_schema": CreativePackage.model_json_schema(),
         },
     )
-    if inference.versions != QWEN_VERSIONS:
+    if settings.insight.runtime == "subprocess" and inference.versions != QWEN_VERSIONS:
         raise RuntimeError(f"Unexpected Qwen worker versions: {inference.versions}")
     try:
         package = CreativePackage.model_validate(_extract_json(inference.text))
@@ -233,6 +236,7 @@ def build_creative(
         "cache_key": cache_key,
         "cache_hit": False,
         "attempt_count": inference.attempt_count,
+        "versions": inference.versions,
         "hook_count": len(package.hooks),
         "scene_count": len(package.script.scenes),
         "storyboard_frame_count": len(package.storyboard.frames),
@@ -261,7 +265,7 @@ def build_creative(
     )
     stages_value = manifest.setdefault("stages", {})
     if not isinstance(stages_value, dict):
-        raise ValueError("Manifest stages must be an object")
+        raise ValueError("Manifest stages must be an object")  # noqa: TRY004 — 保留对文件内容验证的 ValueError 契约。
     stages_value["stage_11_creative"] = {
         "cache_key": cache_key,
         "artifacts": {

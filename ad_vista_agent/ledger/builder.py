@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from ad_vista_agent.config import Settings
 from ad_vista_agent.ingestion import ingest_video
+from ad_vista_agent.reports.evidence import build_evidence_document
 from ad_vista_agent.runtime import ArtifactStore, sha256_file
 from ad_vista_agent.runtime.stage_cache import stage_cache_key
 from ad_vista_agent.schemas import (
@@ -19,9 +20,8 @@ from ad_vista_agent.schemas import (
     EvidenceLedger,
     EvidenceRelation,
 )
-from .rules import build_ocr_clusters, build_relations
-from ad_vista_agent.reports.evidence import build_evidence_document
 
+from .rules import build_ocr_clusters, build_relations
 
 LEDGER_PIPELINE_VERSION = "1"
 ModelT = TypeVar("ModelT", bound=BaseModel)

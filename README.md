@@ -18,7 +18,7 @@ Agent 控制层使用 **LangGraph ReAct**，使用 LangChain 的 Structured Tool
 建议使用 Linux、Python 3.11-3.13 和 NVIDIA GPU。
 
 ```bash
-cd AdVista
+cd AdVista-Agent
 python -m venv .venv
 .venv/bin/python -m pip install -e .
 python -m venv .venv-asr
@@ -61,7 +61,7 @@ export ADVISTA_DATABASE_URL='postgresql+psycopg://advista:password@127.0.0.1:543
 .venv/bin/advista-agent database-check --config configs/local.yaml
 ```
 
-数据库目前作为可选基础设施接入；未设置该环境变量时，现有 SQLite 对话和文件状态流程保持不变。
+数据库为可选基础设施。启用后，Web 视频问答的消息、回答版本、历史和反馈统一使用 PostgreSQL；同一幂等键重试会返回原回答及原消息 ID、引用和报告链接。未配置数据库时使用 SQLite。已有 SQLite 历史不会自动复制到数据库，迁移需单独执行。
 
 如果需要把已有 SQLite 普通对话迁移到 PostgreSQL，先启动 PostgreSQL 并加载 `.env`，然后执行：
 
@@ -72,7 +72,7 @@ set +a
 advista-agent migrate-conversations --config configs/local.yaml
 ```
 
-该迁移可以重复执行，已有会话、消息、反馈和回答版本会被跳过，不会重复导入。
+该迁移可以重复执行，已有会话、消息、反馈和回答版本会被跳过，不会重复导入。新版 SQLite 会话的手动标题会一并导入；重复迁移不会覆盖 PostgreSQL 中已有的名称。
 
 已有 Web Job JSON 可以回填为执行记录：
 
@@ -190,6 +190,16 @@ bash scripts/stop_local_stack.sh
 
 当前本地测试服务只绑定 `127.0.0.1`，不会接受公网访问。
 
+普通对话首轮回答及视频任务完成后，页面异步请求本地模型生成简短的内容摘要标题；模型不可用时使用用户问题提取标题，不影响回答显示。普通对话和视频任务分别保存在侧栏，每次视频执行均可独立打开。
+
+点击侧栏会话旁或顶部的 `✎` 可重命名，标题上限为 80 个字符。手动名称会保存，刷新页面或继续聊天后仍保留，后续自动摘要不会覆盖。视频标题和原始任务目标分别显示，改名不会改变分析目标。
+
+点击会话旁或顶部的垃圾桶按钮，确认后可从历史移除普通对话和视频任务。这里采用软删除，保留原视频、报告与历史数据；删除后旧会话链接不可继续访问，也不会被迟到的回答或标题重新创建。运行中的视频任务需要先取消并等待停止，再删除。
+
+新生成的卖点报告采用浅色版式，以分析主题为标题，先展示摘要和核心卖点，再展示其他维度、审计发现和证据缺口。每条结论可以展开证据和来源信息，支持下载文字版和浏览器打印为 PDF。报告保留完整引用、置信度与审计结果；旧报告文件不自动改写。
+
+洞察输出遇到结构或引用校验错误时，会基于同一份证据进行一次受限修正，并再次完整校验。外文 OCR 的中文解释保留可核对的短原文引用；修正失败的输出不会交付，页面会明确提示证据校验失败。若审计建议复核，任务进入“待确认”，需要用户查看报告并决定是否批准。
+
 ### 2. 启动 AdInsight-RL 服务
 
 ```bash
@@ -223,3 +233,36 @@ Agent 的三个可选交付任务为：
 - `creative`：基于证据生成 Hook、脚本、分镜、CTA 和 A/B 方案。
 
 证据提取是上述交付任务的共享内部前置阶段；视频问答可在任务完成后继续使用。系统不会接受新的 `risk_audit` 公开任务，但会保留历史任务读取和报告内部的风险审计。
+
+## 取消任务与停止服务
+
+取消任务会向规划、工具和模型 HTTP 请求传播取消信号。可取消 HTTP 使用当前 Python 的轻量客户端进程，保留流式输出；请求通过 stdin 传输，取消或超时会终止客户端并断开连接，无需重启模型服务。
+
+Web 服务接收 SIGTERM 或 Ctrl+C 时执行清理：拒绝新任务与聊天，取消队列和运行任务，等待正在执行的操作退出，再关闭数据库和监听 socket。取消在 JSON 和数据库中记录为 cancelled。已经提交的回答仍保留原终态，支持重放。
+
+服务端是否立即停止 GPU 推理取决于模型服务的断连处理；应用关闭会等待不支持取消的纯计算函数完成。多主机使用不同输出目录时仍需要分布式任务协调。
+
+## 开发与验证
+
+使用独立虚拟环境安装开发依赖，避免系统 Python 中其他项目的依赖冲突：
+
+```bash
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pip check
+.venv/bin/python -m pytest -q
+.venv/bin/python -m ruff check ad_vista_agent tests scripts
+.venv/bin/python -m mypy ad_vista_agent --ignore-missing-imports
+node --check ad_vista_agent/web/static/app.js
+```
+
+普通测试使用临时目录、隔离数据库和假模型，不要求 GPU 或真实模型服务。取消回归会在 127.0.0.1 随机端口启动模拟模型，需要允许本机 socket。两项 PostgreSQL 集成测试默认跳过；隔离测试库通过 ADVISTA_TEST_DATABASE_URL 指定。视频一致性测试也可通过 ADVISTA_VIDEO_TEST_DATABASE_URL 在隔离 PostgreSQL 中执行，每项使用独立 schema。
+
+标题存储测试也可通过 `ADVISTA_TITLE_TEST_DATABASE_URL` 使用隔离 PostgreSQL，每项创建并清理独立 schema；不要指向用户数据库。前端标题与会话切换行为回归需要 Node.js，通过 `pytest` 自动执行，无需访问模型或网络。
+
+运行本机环境诊断时，使用已配置的 `configs/local.yaml`：
+
+```bash
+.venv/bin/advista-agent doctor --config configs/local.yaml
+```
+
+`doctor` 会检查模型目录、推理解释器及模型 API。模型文件存在但服务未启动时，诊断仍返回失败；先启动模型服务，再重试。Web `/api/health` 只检查应用及可选数据库，不证明模型、ASR 和 OCR 可用。

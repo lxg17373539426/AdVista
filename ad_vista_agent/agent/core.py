@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import json
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,12 +21,13 @@ from ad_vista_agent.schemas import (
     ToolCallStatus,
 )
 from ad_vista_agent.tools import ToolContext, ToolRegistry
+from ad_vista_agent.tools.base import get_active_cancel_event
 
 from .planner import rule_plan, validate_plan
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _session_path(state_dir: Path) -> Path:
@@ -135,19 +135,10 @@ def _deliver(state: AgentSessionState) -> None:
     requested = set(state.plan.deliverables)
     report = next((item for item in reversed(observations) if "html" in item), None)
     strategy = next((item for item in reversed(observations) if "strategy" in item), None)
-    insights = next(
-        (
-            item
-            for item in reversed(observations)
-            if "insight_count" in item and "html" not in item
-        ),
-        None,
-    )
     if report and "report" in requested:
         state.deliverables["report"] = report
     if strategy and "strategy" in requested:
         state.deliverables["strategy"] = strategy
-    evidence = next((item for item in reversed(observations) if "evidence_count" in item), None)
     creative = next((item for item in reversed(observations) if "package" in item), None)
     if creative and "creative" in requested:
         state.deliverables["creative"] = creative
@@ -204,9 +195,8 @@ def _execute_state(
     state.status = AgentRunStatus.RUNNING
     state.error = None
     _write(store, state_dir, run_dir, state)
-    executed = len(
-        [call for call in state.tool_calls if call.status == ToolCallStatus.COMPLETED]
-    )
+    # Failed attempts also spend the execution budget, including across resumes.
+    executed = len(state.tool_calls)
     for step in state.plan.steps:
         if cancel_event is not None and cancel_event.is_set():
             state.status = AgentRunStatus.CANCELLED
@@ -271,6 +261,11 @@ def _execute_state(
             state.error = f"Tool {step.tool} failed: {record.error}"
             record.completed_at = _now()
             record.duration_seconds = round(time.perf_counter() - started, 6)
+            if cancel_event is not None and cancel_event.is_set():
+                state.status = AgentRunStatus.CANCELLED
+                state.error = "Agent execution cancelled"
+                _write(store, state_dir, run_dir, state)
+                return state.model_dump(mode="json")
             _write(store, state_dir, run_dir, state)
             raise RuntimeError(state.error) from exc
         record.completed_at = _now()
@@ -382,7 +377,23 @@ def resume_agent(
     registry: ToolRegistry,
 ) -> dict[str, Any]:
     store = ArtifactStore(settings.paths.output_root)
+    _, _, state = _load(store, run_id)
+    with store.lock(f"agent_{state.run_id}"):
+        return _resume_agent_locked(run_id, settings, approve=approve, registry=registry)
+
+
+def _resume_agent_locked(
+    run_id: str,
+    settings: Settings,
+    *,
+    approve: bool,
+    registry: ToolRegistry,
+) -> dict[str, Any]:
+    # Reload after acquiring the lock: another resume may have finished while
+    # this caller was waiting.
+    store = ArtifactStore(settings.paths.output_root)
     state_dir, run_dir, state = _load(store, run_id)
+    cancel_event = get_active_cancel_event()
     if settings.agent.backend == "langgraph":
         from .langgraph_backend import run_langgraph_agent
 
@@ -395,16 +406,18 @@ def resume_agent(
             state.confirmations.clear()
         if state.status == AgentRunStatus.COMPLETED:
             return state.model_dump(mode="json")
-        with store.lock(f"agent_{state.run_id}"):
-            return run_langgraph_agent(
-                state.source_path,
-                settings,
-                state.request,
-                plan=state.plan,
-                registry=registry,
-                execution_id=state.execution_id,
-                existing_state=state,
-            )
+        if state.status == AgentRunStatus.WAITING_CONFIRMATION and not approve:
+            return state.model_dump(mode="json")
+        return run_langgraph_agent(
+            state.source_path,
+            settings,
+            state.request,
+            plan=state.plan,
+            registry=registry,
+            execution_id=state.execution_id,
+            existing_state=state,
+            cancel_event=cancel_event,
+        )
     if approve:
         if state.status != AgentRunStatus.WAITING_CONFIRMATION:
             raise ValueError("Agent session is not waiting for confirmation")
@@ -415,20 +428,6 @@ def resume_agent(
         state.status = AgentRunStatus.PLANNED
         state.error = None
         _write(store, state_dir, run_dir, state)
-        with store.lock(f"agent_{state.run_id}"):
-            return _execute_state(
-                state,
-                state_dir,
-                run_dir,
-                settings,
-                registry,
-                force_tools=set(),
-            )
-    if state.status == AgentRunStatus.COMPLETED:
-        return state.model_dump(mode="json")
-    if state.status == AgentRunStatus.WAITING_CONFIRMATION:
-        return state.model_dump(mode="json")
-    with store.lock(f"agent_{state.run_id}"):
         return _execute_state(
             state,
             state_dir,
@@ -436,8 +435,21 @@ def resume_agent(
             settings,
             registry,
             force_tools=set(),
-            cancel_event=None,
+            cancel_event=cancel_event,
         )
+    if state.status == AgentRunStatus.COMPLETED:
+        return state.model_dump(mode="json")
+    if state.status == AgentRunStatus.WAITING_CONFIRMATION:
+        return state.model_dump(mode="json")
+    return _execute_state(
+        state,
+        state_dir,
+        run_dir,
+        settings,
+        registry,
+        force_tools=set(),
+        cancel_event=cancel_event,
+    )
 
 
 def reject_agent(
@@ -449,11 +461,13 @@ def reject_agent(
 ) -> dict[str, Any]:
     del registry
     store = ArtifactStore(settings.paths.output_root)
-    state_dir, run_dir, state = _load(store, identifier)
-    if state.status != AgentRunStatus.WAITING_CONFIRMATION:
-        raise ValueError("Agent session is not waiting for confirmation")
-    state.confirmations.clear()
-    state.status = AgentRunStatus.FAILED
-    state.error = reason
-    _write(store, state_dir, run_dir, state)
-    return state.model_dump(mode="json")
+    _, _, state = _load(store, identifier)
+    with store.lock(f"agent_{state.run_id}"):
+        state_dir, run_dir, state = _load(store, identifier)
+        if state.status != AgentRunStatus.WAITING_CONFIRMATION:
+            raise ValueError("Agent session is not waiting for confirmation")
+        state.confirmations.clear()
+        state.status = AgentRunStatus.FAILED
+        state.error = reason
+        _write(store, state_dir, run_dir, state)
+        return state.model_dump(mode="json")

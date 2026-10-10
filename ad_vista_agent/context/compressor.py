@@ -62,12 +62,14 @@ def compress_evidence_context(
         speech = evidence_context.get("speech_evidence", [])
         clusters = evidence_context.get("ocr_clusters", [])
         citation_rules["allowed_speech_ids"] = [
-            row["evidence_id"] for row in speech
-            if isinstance(row, dict) and isinstance(row.get("evidence_id"), str)
+            row.get("evidence_id") or row["id"] for row in speech
+            if isinstance(row, dict)
+            and isinstance(row.get("evidence_id") or row.get("id"), str)
         ]
         citation_rules["allowed_ocr_cluster_ids"] = [
-            row["cluster_id"] for row in clusters
-            if isinstance(row, dict) and isinstance(row.get("cluster_id"), str)
+            row.get("cluster_id") or row["id"] for row in clusters
+            if isinstance(row, dict)
+            and isinstance(row.get("cluster_id") or row.get("id"), str)
         ]
         evidence_context["citation_rules"] = citation_rules
 

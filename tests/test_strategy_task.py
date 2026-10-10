@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from ad_vista_agent.agent.planner import rule_plan
 from ad_vista_agent.schemas import AgentRequest

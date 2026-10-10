@@ -30,7 +30,7 @@ class GroundedMarketingInsight(BaseModel):
     reasoning_summary: str = Field(min_length=1)
 
     @model_validator(mode="after")
-    def validate_refs(self) -> "GroundedMarketingInsight":
+    def validate_refs(self) -> GroundedMarketingInsight:
         if len(set(self.evidence_refs)) != len(self.evidence_refs):
             raise ValueError("Insight evidence references must be unique")
         return self

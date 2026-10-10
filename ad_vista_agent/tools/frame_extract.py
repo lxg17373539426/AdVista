@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from ad_vista_agent.runtime.fingerprint import sha256_file
+from ad_vista_agent.runtime.process import ProcessCancelled, run_process
 
 from .base import Tool, ToolContext
-from ad_vista_agent.runtime.process import ProcessCancelled, run_process
 
 
 @dataclass(frozen=True)
@@ -58,6 +58,8 @@ class FrameExtractTool(Tool):
             str(video_path),
             "-map",
             "0:v:0",
+            "-pix_fmt",
+            "yuvj420p",
             "-frames:v",
             "1",
             "-q:v",

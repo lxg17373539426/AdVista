@@ -1,5 +1,9 @@
-from ad_vista_agent.context import build_context_budget, compress_evidence_context, estimate_tokens
 from ad_vista_agent.config import load_settings
+from ad_vista_agent.context import (
+    build_context_budget,
+    compress_evidence_context,
+    estimate_tokens,
+)
 
 
 def test_qwen_context_budget_reserves_output_and_protocol_tokens() -> None:
@@ -52,3 +56,27 @@ def test_nested_ledger_compression_updates_citation_rules() -> None:
     assert "ocr_cluster_0099" in ledger["citation_rules"]["allowed_ocr_cluster_ids"]
     assert len(ledger["citation_rules"]["allowed_speech_ids"]) == 40
     assert len(ledger["citation_rules"]["allowed_ocr_cluster_ids"]) == 80
+
+
+def test_flat_chat_context_compression_preserves_citation_ids() -> None:
+    budget = build_context_budget(load_settings(), output_tokens=256)
+    context = {
+        "speech_evidence": [
+            {"id": f"speech_{i:04d}", "content": "轻便透气" if i == 99 else "其他"}
+            for i in range(100)
+        ],
+        "ocr_clusters": [
+            {"id": f"ocr_cluster_{i:04d}", "content": "多种尺码" if i == 99 else "其他"}
+            for i in range(100)
+        ],
+        "citation_rules": {"allowed_speech_ids": [], "allowed_ocr_cluster_ids": []},
+    }
+
+    compressed, _ = compress_evidence_context(
+        context,
+        "轻便透气 多种尺码",
+        budget.model_copy(update={"soft_limit_tokens": 1}),
+    )
+
+    assert "speech_0099" in compressed["citation_rules"]["allowed_speech_ids"]
+    assert "ocr_cluster_0099" in compressed["citation_rules"]["allowed_ocr_cluster_ids"]

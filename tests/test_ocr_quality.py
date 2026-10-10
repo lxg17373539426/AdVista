@@ -1,8 +1,16 @@
+from pathlib import Path
+
 from ad_vista_agent.ledger.rules import build_ocr_clusters
 from ad_vista_agent.ocr.parse import ocr_quality_flags, parse_deepseek_grounding
 from ad_vista_agent.ocr.quality import build_ocr_quality_report
-from ad_vista_agent.schemas import BoundingBox, Evidence, EvidenceModality, EpistemicStatus, OcrFrameResult, OcrRegion
-from pathlib import Path
+from ad_vista_agent.schemas import (
+    BoundingBox,
+    EpistemicStatus,
+    Evidence,
+    EvidenceModality,
+    OcrFrameResult,
+    OcrRegion,
+)
 
 
 def _evidence(identifier: str, content: str, confidence: float, flags: list[str]) -> Evidence:

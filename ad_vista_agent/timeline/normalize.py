@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import pairwise
 
 from ad_vista_agent.schemas.timeline import Shot
 
@@ -48,7 +49,7 @@ def normalize_shots(
             cut_points.add(min(duration_ms, max(0, raw.end_ms)))
         ordered = sorted(cut_points)
         normalized = []
-        for start, end in zip(ordered, ordered[1:]):
+        for start, end in pairwise(ordered):
             if end <= start:
                 continue
             score = next((item.score for item in valid if item.end_ms == end), None)

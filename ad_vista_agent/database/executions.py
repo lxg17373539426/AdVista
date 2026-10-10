@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import hashlib
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -10,7 +11,7 @@ from .models import Execution, Request, ToolCall
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class ExecutionRepository:
@@ -82,7 +83,16 @@ class ExecutionRepository:
                 if not call_id:
                     continue
                 tool_call_id = f"{execution_id}:{call_id}"
-                record = session.get(ToolCall, tool_call_id)
+                if len(tool_call_id) > 64:
+                    tool_call_id = hashlib.sha256(tool_call_id.encode("utf-8")).hexdigest()
+                # Match the natural key so historical primary keys remain
+                # usable after changing the encoding of long combined IDs.
+                record = session.scalar(
+                    select(ToolCall).where(
+                        ToolCall.execution_id == execution_id,
+                        ToolCall.call_id == call_id,
+                    )
+                )
                 if record is None:
                     record = ToolCall(
                         tool_call_id=tool_call_id,

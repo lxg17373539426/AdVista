@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -10,8 +10,11 @@ from pydantic import SecretStr
 from sqlalchemy import inspect, text
 
 from ad_vista_agent.config import DatabaseConfig, load_settings
-from ad_vista_agent.database import Base, Database
-from ad_vista_agent.database import models  # noqa: F401
+from ad_vista_agent.database import (
+    Base,
+    Database,
+    models,  # noqa: F401
+)
 from ad_vista_agent.database.models import User
 from ad_vista_agent.web.service import WebService
 
@@ -40,24 +43,23 @@ def test_database_session_commits_and_rolls_back(tmp_path: Path) -> None:
                     username="first@example.test",
                     role="user",
                     status="active",
-                    created_at=datetime.now(timezone.utc),
+                    created_at=datetime.now(UTC),
                 )
             )
         with database.engine.connect() as connection:
             assert connection.execute(text("SELECT count(*) FROM users")).scalar_one() == 1
 
-        with pytest.raises(RuntimeError):
-            with database.session() as session:
-                session.add(
-                    User(
-                        user_id="user_2",
-                        username="second@example.test",
-                        role="user",
-                        status="active",
-                        created_at=datetime.now(timezone.utc),
-                    )
+        with pytest.raises(RuntimeError), database.session() as session:
+            session.add(
+                User(
+                    user_id="user_2",
+                    username="second@example.test",
+                    role="user",
+                    status="active",
+                    created_at=datetime.now(UTC),
                 )
-                raise RuntimeError("rollback")
+            )
+            raise RuntimeError("rollback")
         with database.engine.connect() as connection:
             assert connection.execute(text("SELECT count(*) FROM users")).scalar_one() == 1
     finally:

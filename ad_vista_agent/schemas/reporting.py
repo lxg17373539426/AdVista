@@ -4,7 +4,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .evidence import EvidenceModality, EpistemicStatus
+from .evidence import EpistemicStatus, EvidenceModality
 
 
 class AuditSeverity(StrEnum):
@@ -67,7 +67,7 @@ class CriticAudit(BaseModel):
     global_findings: list[AuditFinding]
 
     @model_validator(mode="after")
-    def validate_counts(self) -> "CriticAudit":
+    def validate_counts(self) -> CriticAudit:
         if self.insight_count != len(self.insights):
             raise ValueError("Critic insight_count must match insight audits")
         if self.passed_count + self.review_count + self.failed_count != self.insight_count:

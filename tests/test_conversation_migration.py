@@ -4,9 +4,21 @@ import sqlite3
 from pathlib import Path
 
 from pydantic import SecretStr
+
 from ad_vista_agent.config import DatabaseConfig
-from ad_vista_agent.database import Base, Database, migrate_sqlite_conversations
-from ad_vista_agent.database.models import AnswerVersion, Feedback, Message
+from ad_vista_agent.database import (
+    Base,
+    Database,
+    PostgresConversationStore,
+    migrate_sqlite_conversations,
+)
+from ad_vista_agent.database.models import (
+    AnswerVersion,
+    Conversation,
+    Feedback,
+    Message,
+)
+from ad_vista_agent.memory import ConversationStore
 
 
 def test_migrate_legacy_sqlite_conversations_is_idempotent(tmp_path: Path) -> None:
@@ -68,5 +80,55 @@ def test_migrate_legacy_sqlite_conversations_is_idempotent(tmp_path: Path) -> No
             assert message is not None and message.content == "核心卖点是清洁"
             assert feedback is not None and feedback.decision == "approve"
             assert version is not None and version.answer_json["answer"] == "核心卖点是清洁"
+    finally:
+        database.close()
+
+
+def _source_with_manual_title(tmp_path: Path) -> ConversationStore:
+    source = ConversationStore(tmp_path / "named-conversations.sqlite3")
+    source.create_session(
+        session_id="session_named",
+        run_id="general_named",
+        source_path=Path("video.mp4"),
+        goal="原始分析目标",
+    )
+    source.set_title("session_named", "用户手动名称")
+    return source
+
+
+def test_migrate_sqlite_preserves_manual_title(tmp_path: Path) -> None:
+    source = _source_with_manual_title(tmp_path)
+    database = Database(
+        DatabaseConfig(url=SecretStr(f"sqlite+pysqlite:///{tmp_path / 'target.db'}"))
+    )
+    try:
+        Base.metadata.create_all(database.engine)
+        result = migrate_sqlite_conversations(source.path, database)
+        assert result["sessions"] == 1
+        with database.session() as session:
+            imported = session.get(Conversation, "session_named")
+            assert imported is not None
+            assert imported.title == "用户手动名称"
+            assert imported.run_id == "general_named"
+        assert source.session("session_named")["goal"] == "原始分析目标"
+        assert source.session("session_named")["source_path"] == "video.mp4"
+    finally:
+        database.close()
+
+
+def test_repeat_migration_preserves_target_manual_title(tmp_path: Path) -> None:
+    source = _source_with_manual_title(tmp_path)
+    database = Database(
+        DatabaseConfig(url=SecretStr(f"sqlite+pysqlite:///{tmp_path / 'target.db'}"))
+    )
+    try:
+        Base.metadata.create_all(database.engine)
+        migrate_sqlite_conversations(source.path, database)
+        target = PostgresConversationStore(database)
+        target.set_title("session_named", "目标库中的新名称")
+        source.set_title("session_named", "旧库中的后续名称")
+        migrate_sqlite_conversations(source.path, database)
+        assert target.session("session_named")["title"] == "目标库中的新名称"
+        assert source.session("session_named")["goal"] == "原始分析目标"
     finally:
         database.close()

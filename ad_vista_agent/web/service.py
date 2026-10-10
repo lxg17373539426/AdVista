@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from ad_vista_agent.agent import (
     build_agent_registry,
@@ -19,14 +20,18 @@ from ad_vista_agent.agent import (
     rule_plan,
     run_agent,
 )
-from ad_vista_agent.agent.core import load_agent_session
 from ad_vista_agent.agent.chat import ask_agent, record_feedback, show_conversation
+from ad_vista_agent.agent.core import load_agent_session
 from ad_vista_agent.config import Settings
 from ad_vista_agent.creative.builder import build_creative
+from ad_vista_agent.errors import ConversationBusyError, JobCapacityError
 from ad_vista_agent.runtime import ArtifactStore, sha256_file
+from ad_vista_agent.runtime.http import cancellable_urlopen
+from ad_vista_agent.runtime.process import ProcessCancelled
 from ad_vista_agent.schemas import AgentRequest
 from ad_vista_agent.tools import ToolContext, VideoProbeTool
-
+from ad_vista_agent.tools.base import reset_active_cancel_event, set_active_cancel_event
+from ad_vista_agent.web.titles import fallback_title, generate_title, normalize_title
 
 LOGGER = logging.getLogger(__name__)
 
@@ -43,8 +48,8 @@ class WebService:
         self.system_user_id = None
         if settings.database.configured:
             from ad_vista_agent.database import (
-                Database,
                 ContextRepository,
+                Database,
                 DiagnosticRepository,
                 ExecutionRepository,
                 RequestRepository,
@@ -66,14 +71,77 @@ class WebService:
         self.job_cancel_events: dict[str, threading.Event] = {}
         self.locks: dict[str, threading.RLock] = {}
         self.guard = threading.RLock()
+        self._lifecycle = threading.Condition(self.guard)
+        self._closing = False
+        self._closed = False
+        self._active_calls = 0
+        self._shutdown_event = threading.Event()
         self.job_root = settings.paths.output_root / "jobs"
         self.job_root.mkdir(parents=True, exist_ok=True)
         self._load_jobs()
 
     def close(self) -> None:
-        self.executor.shutdown(wait=False, cancel_futures=True)
-        if self.database is not None:
-            self.database.close()
+        with self._lifecycle:
+            if self._closed:
+                return
+            if self._closing:
+                self._lifecycle.wait_for(lambda: self._closed)
+                return
+            self._closing = True
+            self._shutdown_event.set()
+            for event in self.job_cancel_events.values():
+                event.set()
+            pending = tuple(self.job_futures.items())
+        cancellation_error: Exception | None = None
+        try:
+            for job_id, future in pending:
+                try:
+                    with self.guard:
+                        if future.cancel():
+                            self._cancel_queued_job(job_id)
+                except Exception as exc:
+                    cancellation_error = exc
+                    LOGGER.exception("Could not persist cancelled job %s during shutdown", job_id)
+            self.executor.shutdown(wait=True, cancel_futures=True)
+            with self._lifecycle:
+                self._lifecycle.wait_for(lambda: self._active_calls == 0)
+            if self.database is not None:
+                self.database.close()
+        finally:
+            with self._lifecycle:
+                self._closed = True
+                self._lifecycle.notify_all()
+        if cancellation_error is not None:
+            raise RuntimeError("Service closed, but job cancellation could not be persisted") from cancellation_error
+
+    def _ensure_open(self) -> None:
+        if self._closing or self._closed:
+            raise RuntimeError("Web service is closing or closed")
+
+    @contextmanager
+    def _active_operation(self) -> Iterator[None]:
+        with self._lifecycle:
+            self._ensure_open()
+            self._active_calls += 1
+        token = set_active_cancel_event(self._shutdown_event)
+        try:
+            yield
+        finally:
+            reset_active_cancel_event(token)
+            with self._lifecycle:
+                self._active_calls -= 1
+                self._lifecycle.notify_all()
+
+    def _cancel_queued_job(self, job_id: str) -> None:
+        job = self.jobs[job_id]
+        if job["status"] == "cancelled":
+            return
+        self._update_job(job_id, status="cancelled")
+        self._update_db_execution(
+            str(job["execution_id"]), status="cancelled", error_code="cancelled",
+            error_message="Job cancelled before execution started",
+        )
+        self._mark_db_request(job_id, "cancelled")
 
     def health(self) -> dict[str, str]:
         if self.database is None:
@@ -110,7 +178,9 @@ class WebService:
         self.request_repository.ensure_conversation(
             conversation_id,
             user_id=owner,
-            run_id=input_json.get("run_id") if isinstance(input_json.get("run_id"), str) else None,
+            run_id=input_json.get("run_id")
+            if isinstance(input_json.get("run_id"), str)
+            else None,
             conversation_type=request_type,
         )
         request, created = self.request_repository.create_request(
@@ -141,7 +211,9 @@ class WebService:
             self.settings.paths.video_data.expanduser().resolve(),
             (self.settings.paths.output_root / "uploads").resolve(),
         ]
-        if not any(candidate == root or candidate.is_relative_to(root) for root in roots):
+        if not any(
+            candidate == root or candidate.is_relative_to(root) for root in roots
+        ):
             raise ValueError("Media path is outside configured media roots")
         if not candidate.is_file():
             raise FileNotFoundError(candidate)
@@ -153,9 +225,14 @@ class WebService:
             metadata = VideoProbeTool(
                 self.settings.tools.ffprobe_executable,
                 self.settings.tools.probe_timeout_seconds,
-            ).run(ToolContext(run_id="upload_validation", run_dir=path.parent), {"video_path": path})
+            ).run(
+                ToolContext(run_id="upload_validation", run_dir=path.parent),
+                {"video_path": path},
+            )
         except (RuntimeError, ValueError) as exc:
-            raise ValueError("无法读取该视频，请确认文件未损坏且包含有效的视频轨道") from exc
+            raise ValueError(
+                "无法读取该视频，请确认文件未损坏且包含有效的视频轨道"
+            ) from exc
         if metadata.duration_ms > self.settings.web.max_video_duration_seconds * 1000:
             raise ValueError(
                 f"Video duration exceeds {self.settings.web.max_video_duration_seconds} seconds"
@@ -199,7 +276,12 @@ class WebService:
                     except (OSError, ValueError, json.JSONDecodeError):
                         session = None
                 session_status = str(session.get("status", "")) if session else ""
-                if session_status in {"completed", "waiting_confirmation", "failed", "cancelled"}:
+                if session_status in {
+                    "completed",
+                    "waiting_confirmation",
+                    "failed",
+                    "cancelled",
+                }:
                     job["status"] = session_status
                     job["result"] = session
                     job.pop("error", None)
@@ -232,6 +314,8 @@ class WebService:
             return rule_plan(request)
         try:
             return qwen_plan(request, registry, self.settings)
+        except ProcessCancelled:
+            raise
         except Exception:
             LOGGER.warning(
                 "Qwen planner unavailable; falling back to rule planner",
@@ -250,7 +334,7 @@ class WebService:
         """
         from ad_vista_agent.errors import AdVistaError
 
-        current = exc
+        current: BaseException | None = exc
         while current is not None:
             if isinstance(current, AdVistaError):
                 for item in (
@@ -281,7 +365,8 @@ class WebService:
             "requires completed" in value
             or "missing:" in value
             or "not completed" in value
-            or "evidence" in value and "lack" in value
+            or "evidence" in value
+            and "lack" in value
         ):
             return {
                 "code": "evidence_incomplete",
@@ -290,7 +375,9 @@ class WebService:
                 "advice": "请重新提交视频，或稍后重试以保证语音、OCR 和关键帧证据完整。",
                 "retryable": True,
             }
-        if "invalid" in value and ("video" in value or "duration" in value or "resolution" in value):
+        if "invalid" in value and (
+            "video" in value or "duration" in value or "resolution" in value
+        ):
             return {
                 "code": "invalid_video",
                 "category": "input_video",
@@ -314,7 +401,11 @@ class WebService:
                 "advice": "请尝试使用更短的视频，或改为更聚焦的任务（例如只做证据提取）。",
                 "retryable": False,
             }
-        if "image(s) may be provided" in value or "image limit" in value or "images per prompt" in value:
+        if (
+            "image(s) may be provided" in value
+            or "image limit" in value
+            or "images per prompt" in value
+        ):
             return {
                 "code": "image_limit",
                 "category": "model_limit",
@@ -322,7 +413,10 @@ class WebService:
                 "advice": "这是服务侧的批次限制，请稍后重试；若持续出现请联系管理员。",
                 "retryable": True,
             }
-        if "citation" in value or "evidence_refs" in value or "grounded" in value:
+        if (
+            "citation" in value or "evidence_refs" in value or "grounded" in value
+            or "cites unknown evidence" in value or "no obvious lexical support" in value
+        ):
             return {
                 "code": "grounding_failed",
                 "category": "validation",
@@ -338,7 +432,12 @@ class WebService:
                 "advice": "请稍后重试；若视频较长，可尝试更短的片段。",
                 "retryable": True,
             }
-        if "qwen" in value or "chat service" in value or "http" in value or "urlopen" in value:
+        if (
+            "qwen" in value
+            or "chat service" in value
+            or "http" in value
+            or "urlopen" in value
+        ):
             return {
                 "code": "model_unavailable",
                 "category": "model_unavailable",
@@ -346,7 +445,12 @@ class WebService:
                 "advice": "请稍后重试；如果问题持续，请联系管理员确认模型服务状态。",
                 "retryable": True,
             }
-        if "unknown" in value or "output" in value or "validation" in value or "plan" in value:
+        if (
+            "unknown" in value
+            or "output" in value
+            or "validation" in value
+            or "plan" in value
+        ):
             return {
                 "code": "output_invalid",
                 "category": "validation",
@@ -365,19 +469,65 @@ class WebService:
     @staticmethod
     def _failure_for_code(code: str, retryable: bool) -> dict[str, Any]:
         messages = {
-            "model_timeout": ("model_unavailable", "视频分析服务响应超时。", "请稍后重试；若视频较长，可尝试更短的片段。"),
-            "model_unavailable": ("model_unavailable", "视频分析服务暂时不可用。", "请稍后重试；如果问题持续，请联系管理员确认模型服务状态。"),
-            "output_invalid": ("validation", "分析结果没有通过格式校验。", "请重新运行；若持续失败，可尝试更明确的任务描述。"),
-            "grounding_failed": ("validation", "模型输出没有通过证据引用校验。", "系统已阻止这个不一致的结果，请重新运行或换一个更具体的问题。"),
-            "invalid_video": ("input_video", "无法读取这个视频文件。", "请确认文件未损坏、包含视频轨道，并符合格式、时长和分辨率限制后重新上传。"),
-            "tool_failed": ("processing", "视频处理失败。", "请稍后重试；如果问题持续，请重新上传视频或联系管理员。"),
-            "cancelled": ("cancelled", "任务已取消。", "已完成的中间结果仍然保留，你可以重新提交。"),
-            "evidence_incomplete": ("evidence", "视频证据尚未准备完成。", "请重新提交视频，或稍后重试以保证语音、OCR 和关键帧证据完整。"),
-            "context_overflow": ("model_limit", "视频内容超出模型单次可处理的长度。", "请尝试使用更短的视频，或改为更聚焦的任务。"),
-            "image_limit": ("model_limit", "关键帧数量超过当前服务的图片上限。", "这是服务侧的批次限制，请稍后重试。"),
+            "model_timeout": (
+                "model_unavailable",
+                "视频分析服务响应超时。",
+                "请稍后重试；若视频较长，可尝试更短的片段。",
+            ),
+            "model_unavailable": (
+                "model_unavailable",
+                "视频分析服务暂时不可用。",
+                "请稍后重试；如果问题持续，请联系管理员确认模型服务状态。",
+            ),
+            "output_invalid": (
+                "validation",
+                "分析结果没有通过格式校验。",
+                "请重新运行；若持续失败，可尝试更明确的任务描述。",
+            ),
+            "grounding_failed": (
+                "validation",
+                "模型输出没有通过证据引用校验。",
+                "系统已阻止这个不一致的结果，请重新运行或换一个更具体的问题。",
+            ),
+            "invalid_video": (
+                "input_video",
+                "无法读取这个视频文件。",
+                "请确认文件未损坏、包含视频轨道，并符合格式、时长和分辨率限制后重新上传。",
+            ),
+            "tool_failed": (
+                "processing",
+                "视频处理失败。",
+                "请稍后重试；如果问题持续，请重新上传视频或联系管理员。",
+            ),
+            "cancelled": (
+                "cancelled",
+                "任务已取消。",
+                "已完成的中间结果仍然保留，你可以重新提交。",
+            ),
+            "evidence_incomplete": (
+                "evidence",
+                "视频证据尚未准备完成。",
+                "请重新提交视频，或稍后重试以保证语音、OCR 和关键帧证据完整。",
+            ),
+            "context_overflow": (
+                "model_limit",
+                "视频内容超出模型单次可处理的长度。",
+                "请尝试使用更短的视频，或改为更聚焦的任务。",
+            ),
+            "image_limit": (
+                "model_limit",
+                "关键帧数量超过当前服务的图片上限。",
+                "这是服务侧的批次限制，请稍后重试。",
+            ),
         }
         category, public_message, advice = messages.get(code, messages["tool_failed"])
-        return {"code": code, "category": category, "message": public_message, "advice": advice, "retryable": retryable}
+        return {
+            "code": code,
+            "category": category,
+            "message": public_message,
+            "advice": advice,
+            "retryable": retryable,
+        }
 
     @classmethod
     def _public_error(cls, message: str) -> str:
@@ -394,8 +544,22 @@ class WebService:
         user_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        video_path = self.allowed_media_path(video_path)
-        self.validate_uploaded_video(video_path)
+        with self._active_operation():
+            video_path = self.allowed_media_path(video_path)
+            self.validate_uploaded_video(video_path)
+            # Publishing the job and registering its future/event share the
+            # lifecycle lock, so cancellation cannot observe a partial job.
+            with self.guard:
+                self._ensure_open()
+                return self._submit_locked(
+                    video_path, goal, deliverables, mode=mode,
+                    user_id=user_id, idempotency_key=idempotency_key,
+                )
+
+    def _submit_locked(
+        self, video_path: Path, goal: str, deliverables: list[str], *,
+        mode: str, user_id: str | None, idempotency_key: str | None,
+    ) -> dict[str, Any]:
         job_id = f"job_{uuid.uuid4().hex}"
         execution_id = f"exec_{uuid.uuid4().hex}"
         deliverables = list(dict.fromkeys(deliverables))
@@ -435,21 +599,27 @@ class WebService:
             )
             if existing_job_id and self._job_path(existing_job_id).is_file():
                 return self.store.read_json(self._job_path(existing_job_id))
-            raise RuntimeError("A request with this idempotency key is already in progress")
-        if request_id is not None and self.execution_repository is not None:
-            self.execution_repository.create(
-                execution_id=execution_id,
-                request_id=request_id,
-                model_version=self.settings.insight.served_model,
-                prompt_version="video-agent-v1",
+            raise RuntimeError(
+                "A request with this idempotency key is already in progress"
             )
+
+        def reject_capacity(message: str) -> None:
+            if request_id is not None and self.request_repository is not None:
+                self.request_repository.mark_failed(
+                    request_id,
+                    error_code=JobCapacityError.code,
+                    error_message=message,
+                )
+                self.request_repository.complete_user_message(request_id)
+            raise JobCapacityError(message)
+
         with self.guard:
             active = sum(
                 job.get("status") in {"queued", "running", "cancelling"}
                 for job in self.jobs.values()
             )
             if active >= self.settings.web.max_active_jobs:
-                raise RuntimeError("Too many active video jobs")
+                reject_capacity("Too many active video jobs")
             if user_id is not None:
                 owned_active = sum(
                     item.get("user_id") == user_id
@@ -457,21 +627,40 @@ class WebService:
                     for item in self.jobs.values()
                 )
                 if owned_active >= self.settings.web.max_active_jobs_per_user:
-                    raise RuntimeError("Too many active jobs for this user")
+                    reject_capacity("Too many active jobs for this user")
+            if request_id is not None and self.execution_repository is not None:
+                self.execution_repository.create(
+                    execution_id=execution_id,
+                    request_id=request_id,
+                    model_version=self.settings.insight.served_model,
+                    prompt_version="video-agent-v1",
+                )
             self.jobs[job_id] = job
             self._persist_job(job)
         self._log_job(logging.INFO, "Video job submitted", job)
         cancel_event = threading.Event()
-        future = self.executor.submit(
-            self._run,
-            job_id,
-            execution_id,
-            video_path,
-            goal,
-            deliverables,
-            mode,
-            cancel_event,
-        )
+        self.job_cancel_events[job_id] = cancel_event
+        try:
+            future = self.executor.submit(
+                self._run,
+                job_id,
+                execution_id,
+                video_path,
+                goal,
+                deliverables,
+                mode,
+                cancel_event,
+            )
+        except Exception as exc:
+            cancel_event.set()
+            self.job_cancel_events.pop(job_id, None)
+            self._update_job(job_id, status="failed", error=self._public_error(str(exc)))
+            self._update_db_execution(
+                execution_id, status="failed", error_code="job_submission_failed",
+                error_message=str(exc),
+            )
+            self._mark_db_request(job_id, "failed", detail=str(exc))
+            raise
         with self.guard:
             self.job_futures[job_id] = future
             self.job_cancel_events[job_id] = cancel_event
@@ -486,10 +675,23 @@ class WebService:
         user_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
+        with self._active_operation():
+            return self._general_chat(
+                message, session_id, on_delta=on_delta, user_id=user_id,
+                idempotency_key=idempotency_key,
+            )
+
+    def _general_chat(
+        self, message: str, session_id: str | None = None, *,
+        on_delta: Callable[[str], None] | None = None,
+        user_id: str | None = None, idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
         value = message.strip()
         if not value:
             raise ValueError("消息不能为空")
         active_session = session_id or f"web_{uuid.uuid4().hex}"
+        self._validate_session_id(active_session)
+        self._assert_session_visible(active_session)
         request_id, created, _ = self._create_db_request(
             user_id=user_id,
             conversation_id=active_session,
@@ -502,19 +704,43 @@ class WebService:
             content=value,
             idempotency_key=idempotency_key or f"chat_{uuid.uuid4().hex}",
         )
-        if request_id is not None and not created and self.request_repository is not None:
+        if (
+            request_id is not None
+            and not created
+            and self.request_repository is not None
+        ):
+            request = self.request_repository.get_request(request_id)
             owner = self._db_user_id(user_id)
-            if owner is not None:
-                prior = self.request_repository.messages(active_session, user_id=owner)
+            if (
+                owner is not None
+                and request.status == "completed"
+                and request.conversation_id is not None
+            ):
+                prior = self.request_repository.messages(
+                    request.conversation_id, user_id=owner
+                )
                 answer = next(
-                    (item.content for item in reversed(prior) if item.role == "assistant"),
+                    (
+                        item.content
+                        for item in reversed(prior)
+                        if item.role == "assistant" and item.request_id == request_id
+                    ),
                     None,
                 )
                 if answer is not None:
-                    return {"status": "ok", "session_id": active_session, "answer": answer, "request_id": request_id}
-            request = self.request_repository.get_request(request_id)
+                    return {
+                        "status": "ok",
+                        "session_id": request.conversation_id,
+                        "answer": answer,
+                        "request_id": request_id,
+                    }
             if request.status == "pending":
-                raise RuntimeError("A request with this idempotency key is already in progress")
+                raise RuntimeError(
+                    "A request with this idempotency key is already in progress"
+                )
+            raise ValueError(
+                "Previous request has no completed answer; use a new idempotency key"
+            )
         conversations = self._conversation_store(user_id=self._db_user_id(user_id))
         conversations.create_session(
             session_id=active_session,
@@ -525,6 +751,7 @@ class WebService:
         history = [
             {"role": item["role"], "content": item["content"]}
             for item in conversations.messages(active_session, limit=20)
+            if request_id is None or item.get("request_id") != request_id
         ]
         payload = {
             "model": self.settings.insight.served_model,
@@ -557,22 +784,54 @@ class WebService:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(call, timeout=self.settings.insight.timeout_seconds) as response:
+            with cancellable_urlopen(
+                call, timeout=self.settings.insight.timeout_seconds,
+                cancel_event=self._shutdown_event,
+            ) as response:
                 if on_delta is None:
                     result = json.loads(response.read().decode("utf-8"))
-                    answer = str(result["choices"][0]["message"]["content"]).strip()
+                    content = result["choices"][0]["message"]["content"]
+                    if not isinstance(content, str):
+                        raise ValueError("Model reply content must be text")
+                    answer = content.strip()
                 else:
                     chunks: list[str] = []
+                    stream_finished = False
                     for raw_line in response:
                         line = raw_line.decode("utf-8").strip()
-                        if not line.startswith("data: ") or line == "data: [DONE]":
+                        if line == "data: [DONE]":
+                            stream_finished = True
+                            break
+                        if not line.startswith("data: "):
                             continue
                         event = json.loads(line[6:])
-                        delta = str(event["choices"][0].get("delta", {}).get("content") or "")
+                        if event.get("choices") == [] and "usage" in event:
+                            continue
+                        delta = str(
+                            event["choices"][0].get("delta", {}).get("content") or ""
+                        )
                         if delta:
+                            self._assert_session_visible(active_session)
                             chunks.append(delta)
                             on_delta(delta)
+                    if not stream_finished:
+                        raise ValueError("Model stream ended before completion")
                     answer = "".join(chunks).strip()
+                if not answer:
+                    raise ValueError("Model reply is empty")
+            if self._shutdown_event.is_set():
+                raise ProcessCancelled("Chat cancelled while service is closing")
+            self._assert_session_visible(active_session)
+        except FileNotFoundError:
+            if request_id is not None and self.request_repository is not None:
+                self.request_repository.mark_cancelled(request_id)
+                self.request_repository.complete_user_message(request_id)
+            raise
+        except ProcessCancelled:
+            if request_id is not None and self.request_repository is not None:
+                self.request_repository.mark_cancelled(request_id)
+                self.request_repository.complete_user_message(request_id)
+            raise
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             if request_id is not None and self.request_repository is not None:
@@ -580,10 +839,12 @@ class WebService:
                     request_id, error_code="model_http_error", error_message=body
                 )
             raise RuntimeError(f"对话服务错误 {exc.code}: {body[-1000:]}") from exc
-        except (KeyError, TypeError, TimeoutError, urllib.error.URLError) as exc:
+        except (KeyError, IndexError, TypeError, ValueError, OSError) as exc:
             if request_id is not None and self.request_repository is not None:
                 self.request_repository.mark_failed(
-                    request_id, error_code="model_request_failed", error_message=str(exc)
+                    request_id,
+                    error_code="model_request_failed",
+                    error_message=str(exc),
                 )
             raise RuntimeError(f"对话服务不可用: {exc}") from exc
         if self.request_repository is None:
@@ -602,7 +863,12 @@ class WebService:
                 )
                 self.request_repository.complete_user_message(request_id)
                 self.request_repository.mark_completed(request_id)
-        return {"status": "ok", "session_id": active_session, "answer": answer, "request_id": request_id}
+        return {
+            "status": "ok",
+            "session_id": active_session,
+            "answer": answer,
+            "request_id": request_id,
+        }
 
     def _conversation_store(self, *, user_id: str | None = None):
         if self.database is not None:
@@ -617,17 +883,225 @@ class WebService:
 
         return ConversationStore(conversation_db(self.settings))
 
-    def general_messages(self, session_id: str) -> dict[str, Any]:
-        if not session_id or any(
+    def general_messages(
+        self, session_id: str, *, user_id: str | None = None
+    ) -> dict[str, Any]:
+        self._validate_session_id(session_id)
+        conversations = self._conversation_store(user_id=self._db_user_id(user_id))
+        session = conversations.session(session_id)
+        messages = conversations.messages(session_id, limit=100)
+        session["title"] = session.get("title") or fallback_title(messages)
+        return {
+            "session": session,
+            "messages": messages,
+        }
+
+    @staticmethod
+    def _validate_session_id(session_id: str) -> None:
+        if not session_id or len(session_id) > 64 or any(
             char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
             for char in session_id
         ):
             raise ValueError("Invalid conversation session ID")
-        conversations = self._conversation_store()
-        return {
-            "session": conversations.session(session_id),
-            "messages": conversations.messages(session_id, limit=100),
-        }
+
+    def conversations(self, *, user_id: str | None = None) -> list[dict[str, Any]]:
+        conversations = self._conversation_store(user_id=self._db_user_id(user_id))
+        rows = conversations.list_sessions(general_only=True)
+        for row in rows:
+            if not row.get("title"):
+                row["title"] = fallback_title(conversations.messages(row["session_id"], limit=6))
+        return rows
+
+    def _assert_session_visible(self, session_id: str) -> None:
+        if self.database is not None:
+            from ad_vista_agent.database.models import Conversation
+
+            with self.database.session() as session:
+                row = session.get(Conversation, session_id)
+                if row is not None and row.deleted_at is not None:
+                    raise FileNotFoundError("Unknown conversation session")
+        from ad_vista_agent.agent.chat import conversation_db
+        from ad_vista_agent.memory import ConversationStore
+
+        path = conversation_db(self.settings)
+        if path.is_file() and ConversationStore(path).is_deleted(session_id):
+            raise FileNotFoundError("Unknown conversation session")
+
+    def _assert_run_visible(self, run_id: str) -> str | None:
+        try:
+            _, _, state = load_agent_session(run_id, self.settings)
+        except FileNotFoundError:
+            return None
+        self._assert_session_visible(state.session_id)
+        return state.session_id
+
+    def authorize_conversation(
+        self, session_id: str, *, user_id: str | None = None, allow_missing: bool = False,
+    ) -> None:
+        self._validate_session_id(session_id)
+        self._assert_session_visible(session_id)
+        try:
+            self._conversation_store(user_id=self._db_user_id(user_id)).session(session_id)
+        except FileNotFoundError:
+            if not allow_missing:
+                raise
+
+    def _assert_conversation_idle(self, session_id: str) -> None:
+        for job in self.jobs.values():
+            identifier = str(job.get("execution_id") or "")
+            matches = job.get("conversation_id") == session_id
+            if not matches and identifier:
+                try:
+                    matches = load_agent_session(identifier, self.settings)[2].session_id == session_id
+                except FileNotFoundError:
+                    pass
+            future = self.job_futures.get(str(job.get("job_id") or ""))
+            if matches and (job.get("status") in {"queued", "running", "cancelling"} or (future is not None and not future.done())):
+                raise ConversationBusyError("视频任务仍在运行，请先取消任务，等待停止后再删除。")
+        if self.database is not None:
+            from sqlalchemy import select
+
+            from ad_vista_agent.database.models import Execution, Request
+
+            with self.database.session() as session:
+                active = session.scalar(select(Execution.execution_id).join(Request).where(
+                    Request.conversation_id == session_id,
+                    Execution.status.in_({"queued", "running", "cancelling"}),
+                ).limit(1))
+                if active is not None:
+                    raise ConversationBusyError("视频任务仍在运行，请先取消任务，等待停止后再删除。")
+
+    def delete_conversation(
+        self, session_id: str, *, user_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self._active_operation(), self.guard:
+            self._validate_session_id(session_id)
+            conversations = self._conversation_store(user_id=self._db_user_id(user_id))
+            try:
+                row = conversations.session(session_id, include_deleted=True)
+            except PermissionError as exc:
+                raise FileNotFoundError("Unknown conversation session") from exc
+            if row.get("deleted_at") is None:
+                self._assert_conversation_idle(session_id)
+                conversations.delete_session(session_id)
+            return {"status": "ok", "session_id": session_id}
+
+    def delete_run(
+        self, run_id: str, *, user_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self._active_operation():
+            _, _, state = load_agent_session(run_id, self.settings)
+            self._validate_session_id(state.session_id)
+            if self.diagnostic_repository is not None:
+                owner = self.diagnostic_repository.execution_owner(run_id) if run_id.startswith("exec_") else self.diagnostic_repository.run_owner(run_id)
+                if owner is not None and owner != self._db_user_id(user_id):
+                    raise FileNotFoundError("Unknown conversation session")
+            conversations = self._conversation_store(user_id=self._db_user_id(user_id))
+            try:
+                conversations.session(state.session_id, include_deleted=True)
+            except PermissionError as exc:
+                raise FileNotFoundError("Unknown conversation session") from exc
+            except FileNotFoundError:
+                self._video_title_session(run_id, user_id=user_id)
+            result = self.delete_conversation(state.session_id, user_id=user_id)
+            return {**result, "run_id": run_id}
+
+    def rename_conversation(
+        self, session_id: str, title: object, *, user_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self._active_operation():
+            self._validate_session_id(session_id)
+            value = normalize_title(title)
+            conversations = self._conversation_store(user_id=self._db_user_id(user_id))
+            return {
+                "status": "ok", "session_id": session_id,
+                "title": conversations.set_title(session_id, value),
+            }
+
+    def generate_conversation_title(
+        self, session_id: str, *, user_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self._active_operation(), self._lock(f"title_{session_id}"):
+            self._validate_session_id(session_id)
+            conversations = self._conversation_store(user_id=self._db_user_id(user_id))
+            session = conversations.session(session_id)
+            title = session.get("title")
+            if not title:
+                title = generate_title(
+                    self.settings, conversations.messages(session_id, limit=20),
+                    cancel_event=self._shutdown_event,
+                )
+                title = conversations.set_title(session_id, title, only_if_empty=True)
+            return {"status": "ok", "session_id": session_id, "title": title}
+
+    def _video_title_session(self, run_id: str, *, user_id: str | None):
+        _, _, state = load_agent_session(run_id, self.settings)
+        self.authorize_run(run_id, user_id=user_id)
+        self._assert_session_visible(state.session_id)
+        self._validate_session_id(state.session_id)
+        owner = self._db_user_id(user_id)
+        conversations = self._conversation_store(user_id=owner)
+        if self.request_repository is not None:
+            self.request_repository.ensure_conversation(
+                state.session_id, user_id=owner or "system",
+                run_id=state.execution_id or state.run_id,
+                conversation_type="video_chat",
+            )
+        else:
+            conversations.create_session(
+                session_id=state.session_id, run_id=state.execution_id or state.run_id,
+                source_path=state.source_path, goal=state.request.goal,
+            )
+        return conversations, state
+
+    def rename_run(
+        self, run_id: str, title: object, *, user_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self._active_operation():
+            value = normalize_title(title)
+            conversations, state = self._video_title_session(run_id, user_id=user_id)
+            return {
+                "status": "ok", "run_id": run_id, "session_id": state.session_id,
+                "title": conversations.set_title(state.session_id, value),
+            }
+
+    def generate_run_title(
+        self, run_id: str, *, user_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self._active_operation(), self._lock(f"title_run_{run_id}"):
+            conversations, state = self._video_title_session(run_id, user_id=user_id)
+            title = conversations.session(state.session_id).get("title")
+            if not title:
+                messages = conversations.messages(state.session_id, limit=20)
+                if not messages:
+                    messages = [{"role": "user", "content": state.request.goal}]
+                analysis_path = self.artifact_root(run_id) / "insights" / "analysis.json"
+                if analysis_path.is_file():
+                    subject = self.store.read_json(analysis_path).get("subject")
+                    if subject:
+                        messages = [{"role": "user", "content": f"视频主题：{subject}。任务：{state.request.goal}"}, *messages]
+                title = generate_title(
+                    self.settings, messages, goal=state.request.goal,
+                    cancel_event=self._shutdown_event,
+                )
+                title = conversations.set_title(state.session_id, title, only_if_empty=True)
+            return {"status": "ok", "run_id": run_id, "session_id": state.session_id, "title": title}
+
+    def _saved_video_title(self, session_id: str) -> str | None:
+        if self.database is not None:
+            from ad_vista_agent.database.models import Conversation
+
+            with self.database.session() as session:
+                row = session.get(Conversation, session_id)
+                return row.title if row is not None and row.deleted_at is None else None
+        from ad_vista_agent.agent.chat import conversation_db
+
+        if conversation_db(self.settings).is_file():
+            try:
+                return self._conversation_store().session(session_id).get("title")
+            except FileNotFoundError:
+                pass
+        return None
 
     def _run(
         self,
@@ -638,6 +1112,18 @@ class WebService:
         deliverables: list[str],
         mode: str,
         cancel_event: threading.Event,
+    ) -> None:
+        token = set_active_cancel_event(cancel_event)
+        try:
+            self._run_job(
+                job_id, execution_id, video_path, goal, deliverables, mode, cancel_event,
+            )
+        finally:
+            reset_active_cancel_event(token)
+
+    def _run_job(
+        self, job_id: str, execution_id: str, video_path: Path,
+        goal: str, deliverables: list[str], mode: str, cancel_event: threading.Event,
     ) -> None:
         with self.guard:
             if cancel_event.is_set():
@@ -660,6 +1146,8 @@ class WebService:
             request = AgentRequest(goal=goal, deliverables=deliverables, mode=mode)
             registry = build_agent_registry(self.settings)
             plan = self._select_plan(request, registry)
+            if cancel_event.is_set():
+                raise ProcessCancelled("Video job cancelled during planning")
             self._update_job(
                 job_id,
                 response_mode=plan.response_mode,
@@ -680,21 +1168,13 @@ class WebService:
                 execution_id=execution_id,
                 cancel_event=cancel_event,
             )
+            if cancel_event.is_set() and result["status"] != "cancelled":
+                raise ProcessCancelled("Video job cancelled before completion")
             context_version = self._publish_db_context(
                 job_id,
                 execution_id,
                 str(result["run_id"]),
             )
-            answer_result = None
-            if plan.response_mode == "answer" and result["status"] == "completed":
-                answer_result = ask_agent(
-                    execution_id,
-                    goal,
-                    self.settings,
-                )
-                result["answer"] = answer_result.get("answer")
-                result["answer_evidence_refs"] = answer_result.get("evidence_refs", [])
-                result["context_version"] = answer_result.get("context_version")
             self._update_job(
                 job_id,
                 status=result["status"],
@@ -725,24 +1205,34 @@ class WebService:
             self._log_job(logging.INFO, "Video job finished", self.jobs[job_id])
         except Exception as exc:
             detail = str(exc)[-4000:]
-            LOGGER.exception("Video job %s failed: %s", job_id, detail)
-            failure = self._classify_failure(detail, exc)
+            cancelled = isinstance(exc, ProcessCancelled) or cancel_event.is_set()
+            status = "cancelled" if cancelled else "failed"
+            if cancelled:
+                LOGGER.info("Video job %s cancelled", job_id)
+                failure = self._failure_for_code("cancelled", False)
+            else:
+                LOGGER.exception("Video job %s failed: %s", job_id, detail)
+                failure = self._classify_failure(detail, exc)
             self._update_job(
                 job_id,
-                status="failed",
+                status=status,
                 error=failure["message"],
                 failure=failure,
             )
             self._sync_db_tool_calls_from_session(execution_id)
             self._update_db_execution(
                 execution_id,
-                status="failed",
+                status=status,
                 current_stage=None,
                 error_code=str(failure["code"]),
                 error_message=detail,
             )
-            self._mark_db_request(job_id, "failed", detail=detail)
-            self._log_job(logging.ERROR, "Video job failed", self.jobs[job_id])
+            self._mark_db_request(job_id, status, detail=detail)
+            self._log_job(
+                logging.INFO if cancelled else logging.ERROR,
+                "Video job cancelled" if cancelled else "Video job failed",
+                self.jobs[job_id],
+            )
 
     def _persist_db_task_summary(
         self,
@@ -766,7 +1256,9 @@ class WebService:
         request_id = job.get("request_id")
         if not isinstance(request_id, str):
             return
-        conversation_id = str(job.get("conversation_id") or f"conversation_{execution_id}")
+        conversation_id = str(
+            job.get("conversation_id") or f"conversation_{execution_id}"
+        )
         try:
             request = self.request_repository.get_request(request_id)
         except KeyError:
@@ -785,16 +1277,16 @@ class WebService:
             )
             self.request_repository.complete_user_message(request_id)
         except (PermissionError, KeyError, ValueError):
-            LOGGER.exception(
-                "Failed to persist DB summary for job %s", job_id
-            )
+            LOGGER.exception("Failed to persist DB summary for job %s", job_id)
 
     @staticmethod
     def _task_completion_summary(result: dict[str, Any]) -> str:
         deliverables = result.get("deliverables")
         values: dict[str, Any] = deliverables if isinstance(deliverables, dict) else {}
         insight_raw = values.get("insights")
-        insight_value: dict[str, Any] = insight_raw if isinstance(insight_raw, dict) else {}
+        insight_value: dict[str, Any] = (
+            insight_raw if isinstance(insight_raw, dict) else {}
+        )
         insight_count = insight_value.get("insight_count")
         labels = {
             "evidence": "证据提取",
@@ -828,6 +1320,7 @@ class WebService:
             self.request_repository.mark_completed(request_id)
         elif status == "cancelled":
             self.request_repository.mark_cancelled(request_id)
+            self.request_repository.complete_user_message(request_id)
         else:
             self.request_repository.mark_failed(
                 request_id,
@@ -882,13 +1375,13 @@ class WebService:
             return None
         with self.guard:
             job = self.jobs.get(job_id, {})
-        conversation_id = str(job.get("conversation_id") or f"conversation_{execution_id}")
+        conversation_id = str(
+            job.get("conversation_id") or f"conversation_{execution_id}"
+        )
         run_dir = self.store.run_dir(run_id)
         execution_artifact_root = self.store.execution_dir(execution_id) / "artifacts"
         artifact_root = (
-            execution_artifact_root
-            if execution_artifact_root.is_dir()
-            else run_dir
+            execution_artifact_root if execution_artifact_root.is_dir() else run_dir
         )
         candidates = {
             "asset": run_dir / "asset.json",
@@ -930,7 +1423,9 @@ class WebService:
             return "output_invalid"
         return "tool_failed"
 
-    def job(self, job_id: str, *, user_id: str | None = None, is_admin: bool = False) -> dict[str, Any]:
+    def job(
+        self, job_id: str, *, user_id: str | None = None, is_admin: bool = False
+    ) -> dict[str, Any]:
         with self.guard:
             if job_id not in self.jobs:
                 raise KeyError(job_id)
@@ -944,10 +1439,18 @@ class WebService:
                 session = self.store.read_json(session_path)
                 calls = session.get("tool_calls") or []
                 running = next(
-                    (call for call in reversed(calls) if call.get("status") == "running"),
+                    (
+                        call
+                        for call in reversed(calls)
+                        if call.get("status") == "running"
+                    ),
                     None,
                 )
-                completed = [call.get("tool") for call in calls if call.get("status") == "completed"]
+                completed = [
+                    call.get("tool")
+                    for call in calls
+                    if call.get("status") == "completed"
+                ]
                 job["current_tool"] = running.get("tool") if running else None
                 job["completed_tools"] = completed
                 steps = (session.get("plan") or {}).get("steps") or []
@@ -962,7 +1465,11 @@ class WebService:
                     self._sync_db_tool_calls(execution_id, session)
                     self._update_db_execution(
                         execution_id,
-                        status=("running" if running else str(session.get("status") or job.get("status"))),
+                        status=(
+                            "running"
+                            if running
+                            else str(session.get("status") or job.get("status"))
+                        ),
                         current_stage=str(running.get("tool")) if running else None,
                         error_message=str(session.get("error") or "") or None,
                     )
@@ -979,28 +1486,51 @@ class WebService:
                         "current_stage": execution.current_stage,
                         "run_id": execution.run_id,
                         "error_code": execution.error_code,
-                        "started_at": execution.started_at.isoformat() if execution.started_at else None,
-                        "completed_at": execution.completed_at.isoformat() if execution.completed_at else None,
+                        "started_at": execution.started_at.isoformat()
+                        if execution.started_at
+                        else None,
+                        "completed_at": execution.completed_at.isoformat()
+                        if execution.completed_at
+                        else None,
                     }
         return job
 
-    def cancel_job(self, job_id: str, *, user_id: str | None = None, is_admin: bool = False) -> dict[str, Any]:
+    def cancel_job(
+        self, job_id: str, *, user_id: str | None = None, is_admin: bool = False
+    ) -> dict[str, Any]:
         with self.guard:
             if job_id not in self.jobs:
                 raise KeyError(job_id)
             job = self.jobs[job_id]
             if user_id is not None and not is_admin and job.get("user_id") != user_id:
                 raise PermissionError("Job does not belong to the authenticated user")
-            if job["status"] in {"completed", "failed", "cancelled", "waiting_confirmation"}:
+            if job["status"] in {
+                "completed",
+                "failed",
+                "cancelled",
+                "waiting_confirmation",
+            }:
                 return json.loads(json.dumps(job, ensure_ascii=False))
             cancel_event = self.job_cancel_events[job_id]
             cancel_event.set()
             future = self.job_futures[job_id]
-            job["status"] = "cancelled" if future.cancel() else "cancelling"
-            self._persist_job(job)
+            if future.cancel():
+                self._cancel_queued_job(job_id)
+            else:
+                job["status"] = "cancelling"
+                self._persist_job(job)
             return json.loads(json.dumps(job, ensure_ascii=False))
 
-    def confirmation(self, identifier: str, decision: str, reason: str = "") -> dict[str, Any]:
+    def confirmation(
+        self, identifier: str, decision: str, reason: str = ""
+    ) -> dict[str, Any]:
+        with self._active_operation():
+            return self._confirmation(identifier, decision, reason)
+
+    def _confirmation(
+        self, identifier: str, decision: str, reason: str = ""
+    ) -> dict[str, Any]:
+        self._assert_run_visible(identifier)
         if decision not in {"approve", "reject"}:
             raise ValueError("Confirmation decision must be approve or reject")
         state = load_agent_session(identifier, self.settings)[2]
@@ -1026,9 +1556,16 @@ class WebService:
                     result=result,
                 )
                 break
-        return {"status": result["status"], "execution_id": identifier, "result": result, "previous_status": state.status.value}
+        return {
+            "status": result["status"],
+            "execution_id": identifier,
+            "result": result,
+            "previous_status": state.status.value,
+        }
 
-    def runs(self, *, user_id: str | None = None, is_admin: bool = False) -> list[dict[str, Any]]:
+    def runs(
+        self, *, user_id: str | None = None, is_admin: bool = False
+    ) -> list[dict[str, Any]]:
         rows = []
         executions_root = self.settings.paths.output_root / "executions"
         if executions_root.is_dir():
@@ -1046,11 +1583,18 @@ class WebService:
                         continue
         root = self.settings.paths.output_root / "runs"
         if root.is_dir():
-            for path in sorted(root.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True):
+            for path in sorted(
+                root.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True
+            ):
                 if path.is_dir() and path.name.startswith("ingest_"):
-                    item = self.run(path.name)
+                    try:
+                        item = self.run(path.name)
+                    except FileNotFoundError:
+                        continue
                     agent_state = item.get("agent")
-                    if isinstance(agent_state, dict) and agent_state.get("execution_id"):
+                    if isinstance(agent_state, dict) and agent_state.get(
+                        "execution_id"
+                    ):
                         continue
                     if self._run_visible(item, user_id=user_id, is_admin=is_admin):
                         rows.append(self._run_summary(item))
@@ -1099,17 +1643,24 @@ class WebService:
             summary["error"] = None
         request_value = agent.get("request")
         plan_value = agent.get("plan")
-        request: dict[str, Any] = request_value if isinstance(request_value, dict) else {}
+        request: dict[str, Any] = (
+            request_value if isinstance(request_value, dict) else {}
+        )
         plan: dict[str, Any] = plan_value if isinstance(plan_value, dict) else {}
         summary["goal"] = request.get("goal") or plan.get("goal") or "视频分析"
-        summary["deliverables"] = list(agent.get("deliverables") or plan.get("deliverables") or [])
-        summary["updated_at"] = agent.get("updated_at") or orchestration.get("updated_at")
+        summary["deliverables"] = list(
+            agent.get("deliverables") or plan.get("deliverables") or []
+        )
+        summary["updated_at"] = agent.get("updated_at") or orchestration.get(
+            "updated_at"
+        )
         summary["has_report"] = bool(item.get("artifacts", {}).get("report_html"))
         summary.pop("agent", None)
         summary.pop("orchestration", None)
         return summary
 
     def run(self, run_id: str) -> dict[str, Any]:
+        self._assert_run_visible(run_id)
         state = None
         if run_id.startswith("exec_"):
             _, run_dir, state = load_agent_session(run_id, self.settings)
@@ -1162,55 +1713,235 @@ class WebService:
             elif filename.startswith("upload_"):
                 analysis_path = artifact_root / "insights" / "analysis.json"
                 if analysis_path.is_file():
-                    filename = str(self.store.read_json(analysis_path).get("subject", filename))
+                    filename = str(
+                        self.store.read_json(analysis_path).get("subject", filename)
+                    )
             result["source_filename"] = filename
         analysis_path = artifact_root / "insights" / "analysis.json"
         if analysis_path.is_file():
             analysis = self.store.read_json(analysis_path)
             result["insight_count"] = len(analysis.get("insights", []))
             if result["insight_count"] == 0:
-                result["insight_notice"] = "当前证据已提取，但模型没有生成可验证洞察。请查看 Evidence 或重新运行洞察。"
+                result["insight_notice"] = (
+                    "当前证据已提取，但模型没有生成可验证洞察。请查看 Evidence 或重新运行洞察。"
+                )
+        agent = result.get("agent") or {}
+        session_id = state.session_id if state is not None else agent.get("session_id")
+        goal = state.request.goal if state is not None else (agent.get("request") or {}).get("goal", "视频分析")
+        result["session_id"] = session_id
+        result["title"] = (
+            self._saved_video_title(session_id) if session_id else None
+        ) or fallback_title([], goal=goal)
         return result
 
-    def chat(self, run_id: str, question: str) -> dict[str, Any]:
-        with self._lock(self._asset_run_id(run_id)):
-            return ask_agent(run_id, question, self.settings)
+    def _video_chat(
+        self,
+        run_id: str,
+        question: str,
+        *,
+        on_delta: Callable[[str], None] | None = None,
+        user_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        self.authorize_run(run_id, user_id=user_id)
+        value = question.strip()
+        if not value:
+            raise ValueError("消息不能为空")
+        _, _, state = load_agent_session(run_id, self.settings)
+        owner = self._db_user_id(user_id)
+        request_id: str | None = None
+        created = True
+        reused_initial_request = False
+        if (
+            self.request_repository is not None
+            and self.execution_repository is not None
+            and state.execution_id
+            and owner is not None
+        ):
+            request_context = self.execution_repository.request_context(
+                state.execution_id
+            )
+            existing_messages = self.request_repository.messages(
+                state.session_id,
+                user_id=owner,
+            )
+            if (
+                idempotency_key is None
+                and request_context is not None
+                and request_context[1] == owner
+                and self.request_repository.get_request(request_context[0]).status
+                in {"pending", "completed"}
+                and value == state.request.goal.strip()
+                and not any(item.role == "assistant" for item in existing_messages)
+            ):
+                request_id = request_context[0]
+                created = False
+                reused_initial_request = True
+        if request_id is None:
+            request_id, created, _ = self._create_db_request(
+                user_id=user_id,
+                conversation_id=state.session_id,
+                request_type="video_chat",
+                input_json={
+                    "question": value,
+                    "run_id": run_id,
+                    "execution_id": state.execution_id,
+                },
+                content=value,
+                idempotency_key=idempotency_key or f"video_chat_{uuid.uuid4().hex}",
+            )
+        if (
+            request_id is not None
+            and not created
+            and not reused_initial_request
+            and self.request_repository is not None
+        ):
+            request = self.request_repository.get_request(request_id)
+            if (
+                request.conversation_id != state.session_id
+                or request.input_json.get("question") != value
+                or request.input_json.get("run_id") != run_id
+            ):
+                raise ValueError("Idempotency key belongs to a different video request")
+            if request.status == "completed":
+                from ad_vista_agent.database import PostgresConversationStore
 
-    def chat_stream(self, run_id: str, question: str, on_delta: Callable[[str], None]) -> dict[str, Any]:
-        with self._lock(self._asset_run_id(run_id)):
-            return ask_agent(run_id, question, self.settings, on_delta=on_delta)
+                if self.database is None:
+                    raise RuntimeError("Database is not configured")
+                result = PostgresConversationStore(
+                    self.database, user_id=owner or "system"
+                ).response_for_request(request_id)
+                if result is None or "assistant_message_id" not in result:
+                    raise RuntimeError(
+                        "Completed request has no replayable response; use a new idempotency key"
+                    )
+                if on_delta is not None:
+                    for offset in range(0, len(result["answer"]), 120):
+                        on_delta(result["answer"][offset : offset + 120])
+                return result
+            if request.status in {"failed", "cancelled"}:
+                raise ValueError(
+                    "Request failed or was cancelled; use a new idempotency key"
+                )
+            raise RuntimeError(
+                "A request with this idempotency key is already in progress"
+            )
+        try:
+            return ask_agent(
+                run_id,
+                value,
+                self.settings,
+                on_delta=on_delta,
+                database_request_id=request_id,
+                database_user_id=owner,
+            )
+        except Exception as exc:
+            if (
+                (created or reused_initial_request)
+                and request_id is not None
+                and self.request_repository is not None
+                and self.request_repository.get_request(request_id).status == "pending"
+            ):
+                if isinstance(exc, ProcessCancelled) or self._shutdown_event.is_set():
+                    self.request_repository.mark_cancelled(request_id)
+                    self.request_repository.complete_user_message(request_id)
+                else:
+                    self.request_repository.mark_failed(
+                        request_id,
+                        error_code="video_chat_failed",
+                        error_message=str(exc),
+                    )
+            raise
+
+    def chat(
+        self,
+        run_id: str,
+        question: str,
+        *,
+        user_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        with (
+            self._active_operation(),
+            self._lock(self._asset_run_id(run_id)),
+            self.store.lock(f"video_chat_{self._asset_run_id(run_id)}"),
+        ):
+            return self._video_chat(
+                run_id,
+                question,
+                user_id=user_id,
+                idempotency_key=idempotency_key,
+            )
+
+    def chat_stream(
+        self,
+        run_id: str,
+        question: str,
+        on_delta: Callable[[str], None],
+        *,
+        user_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        with (
+            self._active_operation(),
+            self._lock(self._asset_run_id(run_id)),
+            self.store.lock(f"video_chat_{self._asset_run_id(run_id)}"),
+        ):
+            return self._video_chat(
+                run_id,
+                question,
+                on_delta=on_delta,
+                user_id=user_id,
+                idempotency_key=idempotency_key,
+            )
 
     def messages(self, run_id: str) -> dict[str, Any]:
+        self._assert_run_visible(run_id)
         return show_conversation(run_id, self.settings)
 
-    def feedback(self, run_id: str, body: dict[str, Any], *, user_id: str | None = None) -> dict[str, Any]:
+    def feedback(
+        self, run_id: str, body: dict[str, Any], *, user_id: str | None = None
+    ) -> dict[str, Any]:
         with self._lock(self._asset_run_id(run_id)):
-            result = record_feedback(
+            self.authorize_run(run_id, user_id=user_id)
+            if self.diagnostic_repository is not None:
+                _, _, state = load_agent_session(run_id, self.settings)
+                owner = self._db_user_id(user_id)
+                if owner is None:
+                    raise PermissionError("Authenticated user is required")
+                feedback_id = f"feedback_{uuid.uuid4().hex}"
+                self.diagnostic_repository.add_feedback(
+                    feedback_id=feedback_id,
+                    user_id=owner,
+                    conversation_id=state.session_id,
+                    execution_id=(
+                        state.execution_id
+                        if state.execution_id
+                        and self.execution_repository is not None
+                        and self.execution_repository.request_context(
+                            state.execution_id
+                        )
+                        is not None
+                        else None
+                    ),
+                    message_id=body.get("message_id"),
+                    decision=str(body.get("decision", "")),
+                    category=str(body.get("category") or "") or None,
+                    note=str(body.get("note", "")),
+                )
+                return {
+                    "status": "ok",
+                    "session_id": state.session_id,
+                    "feedback_id": feedback_id,
+                    "decision": str(body.get("decision", "")),
+                }
+            return record_feedback(
                 run_id,
                 str(body.get("decision", "")),
                 str(body.get("note", "")),
                 self.settings,
                 message_id=body.get("message_id"),
             )
-            if self.diagnostic_repository is not None:
-                _, _, state = load_agent_session(run_id, self.settings)
-                owner = self._db_user_id(user_id)
-                if owner is not None:
-                    self.diagnostic_repository.add_feedback(
-                        feedback_id=result["feedback_id"],
-                        user_id=owner,
-                        conversation_id=(
-                            f"conversation_{state.execution_id}"
-                            if state.execution_id
-                            else state.session_id
-                        ),
-                        execution_id=state.execution_id,
-                        message_id=body.get("message_id"),
-                        decision=str(body.get("decision", "")),
-                        category=str(body.get("category") or "") or None,
-                        note=str(body.get("note", "")),
-                    )
-            return result
 
     def diagnostic_executions(
         self, *, status: str | None = None, limit: int = 100
@@ -1229,12 +1960,24 @@ class WebService:
             raise RuntimeError("Database is not configured")
         return self.diagnostic_repository.stats()
 
-    def diagnostic_export(self, *, status: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
+    def diagnostic_export(
+        self, *, status: str | None = None, limit: int = 500
+    ) -> list[dict[str, Any]]:
         if self.diagnostic_repository is None:
             raise RuntimeError("Database is not configured")
         return self.diagnostic_repository.export_executions(status=status, limit=limit)
 
-    def authorize_run(self, run_id: str, *, user_id: str | None, is_admin: bool = False) -> None:
+    def authorize_run(
+        self, run_id: str, *, user_id: str | None, is_admin: bool = False
+    ) -> None:
+        session_id = self._assert_run_visible(run_id)
+        if self.database is not None and user_id is not None and not is_admin and session_id is not None:
+            from ad_vista_agent.database.models import Conversation
+
+            with self.database.session() as session:
+                conversation = session.get(Conversation, session_id)
+                if conversation is not None and conversation.user_id != user_id:
+                    raise PermissionError("Run does not belong to the authenticated user")
         if self.diagnostic_repository is None or user_id is None or is_admin:
             return
         owner = (
@@ -1246,7 +1989,8 @@ class WebService:
             raise PermissionError("Run does not belong to the authenticated user")
 
     def creative(self, run_id: str) -> dict[str, Any]:
-        with self._lock(self._asset_run_id(run_id)):
+        with self._active_operation(), self._lock(self._asset_run_id(run_id)):
+            self._assert_run_visible(run_id)
             if run_id.startswith("exec_"):
                 _, run_dir, state = load_agent_session(run_id, self.settings)
                 artifact_root = self.store.execution_dir(run_id) / "artifacts"

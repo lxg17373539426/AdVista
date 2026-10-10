@@ -1,7 +1,6 @@
 from pathlib import Path
 from typing import Any, cast
 
-
 STATIC = Path(__file__).resolve().parents[1] / "ad_vista_agent" / "web" / "static"
 
 
@@ -140,6 +139,23 @@ def test_documents_are_single_intent_and_evidence_has_real_exports() -> None:
     assert rule_plan(AgentRequest(goal="请制定营销策略", deliverables=[])).deliverables == ["strategy"]
     assert rule_plan(AgentRequest(goal="请生成报告", deliverables=[])).deliverables == ["report"]
 
+    direct = rule_plan(AgentRequest(
+        goal="为这个广告生成一份营销方案，基于产品卖点、受众群体和销售地区展开。",
+        deliverables=[],
+    ))
+    assert direct.response_mode == "answer"
+    assert direct.deliverables == []
+    assert [step.tool for step in direct.steps] == [
+        "ingest", "timeline", "speech", "ocr", "ledger"
+    ]
+
+    explicit = rule_plan(AgentRequest(
+        goal="请生成可下载的营销方案文件",
+        deliverables=[],
+    ))
+    assert explicit.response_mode == "artifact"
+    assert explicit.deliverables == ["strategy"]
+
     app = (STATIC.parents[1] / "web" / "app.py").read_text(encoding="utf-8")
     evidence = (STATIC.parents[1] / "reports" / "evidence.py").read_text(encoding="utf-8")
     assert '"evidence-html"' in app
@@ -179,7 +195,11 @@ def test_video_chat_respects_image_limit_and_ad_vista_identity() -> None:
 
 
 def test_marketing_requests_are_not_routed_to_generic_report() -> None:
-    from ad_vista_agent.agent.chat import _is_direct_marketing_summary, _is_marketing_request, _is_report_request
+    from ad_vista_agent.agent.chat import (
+        _is_direct_marketing_summary,
+        _is_marketing_request,
+        _is_report_request,
+    )
 
     chat = (STATIC.parents[1] / "agent" / "chat.py").read_text(encoding="utf-8")
 
@@ -235,9 +255,9 @@ def test_visual_observations_are_persisted_for_video_chat() -> None:
 def test_timeline_keyframes_anchor_shot_starts_for_temporal_questions() -> None:
     builder = (STATIC.parents[1] / "timeline" / "builder.py").read_text(encoding="utf-8")
 
-    assert '"keyframe_strategy": "shot_start_v2"' in builder
+    assert '"keyframe_strategy": "adaptive_shot_start_middle_end_v1"' in builder
     assert "timestamp_ms = shot.start_ms" in builder
-    assert 'selection_reason="shot_start"' in builder
+    assert 'specs: list[tuple[int, str, str]] = [(timestamp_ms, "primary", "shot_start")]' in builder
 
 
 def test_chat_does_not_treat_keyframe_sample_time_as_video_start() -> None:
@@ -279,6 +299,15 @@ def test_planner_response_mode_controls_uploaded_video_result() -> None:
     assert "response_mode=answer" in planner
 
 
+def test_answer_mode_has_a_single_answer_owner() -> None:
+    service = (STATIC.parents[1] / "web" / "service.py").read_text(encoding="utf-8")
+    script = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert 'if(value.response_mode==="answer"){await readAnswerStream' in script
+    worker = service[service.index("def _run("):service.index("def _persist_db_task_summary")]
+    assert "ask_agent(" not in worker
+
+
 def test_answer_plan_has_no_artifact_deliverables() -> None:
     from ad_vista_agent.agent.planner import PlannerDecision, compile_decision
     from ad_vista_agent.schemas import AgentRequest
@@ -295,6 +324,29 @@ def test_answer_plan_has_no_artifact_deliverables() -> None:
     assert plan.response_mode == "answer"
     assert plan.deliverables == []
     assert [step.tool for step in plan.steps] == ["ingest", "timeline", "speech", "ocr", "ledger"]
+
+
+def test_qwen_decision_cannot_route_direct_marketing_plan_to_artifacts() -> None:
+    from ad_vista_agent.agent.planner import PlannerDecision, compile_decision
+    from ad_vista_agent.schemas import AgentRequest
+
+    request = AgentRequest(
+        goal="为这个广告生成一份营销方案，基于这个产品的卖点、受众群体以及可以销售的地区进行展开。"
+    )
+    decision = PlannerDecision(
+        goal=request.goal,
+        selected_tools=["strategy"],
+        deliverables=["strategy"],
+        response_mode="artifact",
+    )
+
+    plan = compile_decision(decision, request)
+
+    assert plan.response_mode == "answer"
+    assert plan.deliverables == []
+    assert [step.tool for step in plan.steps] == [
+        "ingest", "timeline", "speech", "ocr", "ledger"
+    ]
 
 
 def test_answer_plan_cannot_run_artifact_tools() -> None:
@@ -315,10 +367,20 @@ def test_answer_plan_cannot_run_artifact_tools() -> None:
     assert [step.tool for step in plan.steps] == ["ingest", "timeline", "speech", "ocr", "ledger"]
 
 
-def test_video_chat_can_use_ledger_without_insight_artifact() -> None:
-    chat = (STATIC.parents[1] / "agent" / "chat.py").read_text(encoding="utf-8")
-    assert "if analysis_path.is_file()" in chat
-    assert "analysis.asset_id if analysis is not None" in chat
+def test_video_chat_can_use_ledger_without_insight_artifact(tmp_path: Path) -> None:
+    from ad_vista_agent.agent.chat import _context
+    from ad_vista_agent.schemas import Evidence
+
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    evidence = Evidence(evidence_id="ev_speech", asset_id="asset_video", modality="speech",
+        start_ms=0, end_ms=1000, content="产品介绍", epistemic_status="stated_by_ad", tool="asr")
+    (ledger / "evidence.jsonl").write_text(evidence.model_dump_json() + "\n", encoding="utf-8")
+    (ledger / "clusters.jsonl").write_text("", encoding="utf-8")
+    context, references = _context(tmp_path)
+    assert context["asset_id"] == "asset_video"
+    assert context["speech_evidence"][0]["content"] == "产品介绍"
+    assert references == {"ev_speech"}
 
 
 def test_video_chat_always_receives_selected_keyframes() -> None:
@@ -338,7 +400,10 @@ def test_video_chat_prioritizes_latest_question_and_samples_full_video() -> None
 
 
 def test_blank_conversation_references_are_removed_before_validation() -> None:
-    from ad_vista_agent.agent.chat import normalize_conversation_answer, validate_conversation_answer
+    from ad_vista_agent.agent.chat import (
+        normalize_conversation_answer,
+        validate_conversation_answer,
+    )
     from ad_vista_agent.schemas import ConversationAnswer
 
     answer = normalize_conversation_answer(

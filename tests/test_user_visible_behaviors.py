@@ -2,8 +2,8 @@ from typing import Any, cast
 
 from ad_vista_agent.agent.chat import (
     _answer_is_incomplete,
-    _answer_with_video_fallback,
     _answer_matches_intent,
+    _answer_with_video_fallback,
     _ground_presented_visual_answer,
     _normalize_model_references,
     _normalize_visual_claim_language,
@@ -83,7 +83,10 @@ def test_heading_only_answers_are_incomplete() -> None:
 
 
 def test_unknown_answer_does_not_get_a_fixed_prefix() -> None:
-    from ad_vista_agent.agent.chat import normalize_conversation_answer, validate_conversation_answer
+    from ad_vista_agent.agent.chat import (
+        normalize_conversation_answer,
+        validate_conversation_answer,
+    )
 
     answer = normalize_conversation_answer(
         ConversationAnswer(
@@ -247,3 +250,27 @@ def test_video_answer_retries_unreviewed_keyframes(monkeypatch, tmp_path) -> Non
     assert calls == [["kf_0", "kf_3"], ["kf_1", "kf_2"]]
     assert reviewed == frames[1:3]
     assert answer.epistemic_status == "visual"
+
+
+def test_video_answer_does_not_turn_model_failures_into_unknown(monkeypatch, tmp_path) -> None:
+    from ad_vista_agent import agent as agent_package
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(agent_package.chat, "_qwen_answer", fail)
+    settings = type("Settings", (), {"insight": type("Insight", (), {"max_images_per_prompt": 2})()})()
+
+    try:
+        _answer_with_video_fallback(
+            "请生成营销方案",
+            {"visual_keyframes": [{"id": "kf_1"}], "visual_observations": []},
+            [],
+            cast(Any, settings),
+            tmp_path,
+            intent="marketing",
+        )
+    except RuntimeError as exc:
+        assert "model unavailable" in str(exc)
+    else:
+        raise AssertionError("model failure was incorrectly converted to an unknown answer")

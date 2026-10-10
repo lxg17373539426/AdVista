@@ -8,12 +8,17 @@ from typing import Any
 from ad_vista_agent.config import Settings
 from ad_vista_agent.runtime import ArtifactStore, sha256_file
 from ad_vista_agent.runtime.stage_cache import stage_cache_key
-from ad_vista_agent.schemas import AdAsset, EpistemicStatus, Evidence, EvidenceModality, SpeechTranscript
+from ad_vista_agent.schemas import (
+    AdAsset,
+    EpistemicStatus,
+    Evidence,
+    EvidenceModality,
+    SpeechTranscript,
+)
 from ad_vista_agent.timeline.builder import build_timeline
 from ad_vista_agent.tools import FasterWhisperTool, ToolContext
 
 from .clean import clean_segments
-
 
 FASTER_WHISPER_VERSION = "1.2.1"
 CTRANSLATE2_VERSION = "4.8.1"

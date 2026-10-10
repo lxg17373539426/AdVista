@@ -28,6 +28,14 @@ timeline:
   min_shot_ms: 500
   frame_format: jpg
   jpeg_quality: 2
+  keyframe_middle_min_shot_ms: 1500
+  keyframe_end_min_shot_ms: 3000
+  max_keyframes_per_shot: 3
+  visual_change_enabled: true
+  visual_change_interval_ms: 1000
+  visual_change_threshold: 0.18
+  visual_change_width: 64
+  visual_change_height: 36
 
 asr:
   python_executable: .venv-asr/bin/python

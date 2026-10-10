@@ -13,14 +13,13 @@ from ad_vista_agent.schemas import (
     EvidenceCluster,
     EvidenceModality,
     GroundedMarketingInsight,
-    Keyframe,
     InsightAudit,
     InsightAuditStatus,
+    Keyframe,
     MarketingAnalysis,
     MarketingDimension,
     ReportEvidence,
 )
-
 
 INFERRED_DIMENSIONS = {
     MarketingDimension.AUDIENCE,

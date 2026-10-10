@@ -26,7 +26,7 @@ class OcrFrameResult(BaseModel):
     regions: list[OcrRegion]
 
     @model_validator(mode="after")
-    def validate_unique_regions(self) -> "OcrFrameResult":
+    def validate_unique_regions(self) -> OcrFrameResult:
         keys = {
             (
                 item.text.casefold(),

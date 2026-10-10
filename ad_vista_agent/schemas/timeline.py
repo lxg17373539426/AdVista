@@ -21,7 +21,7 @@ class Shot(BaseModel):
     normalization_actions: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_interval(self) -> "Shot":
+    def validate_interval(self) -> Shot:
         if self.end_ms <= self.start_ms:
             raise ValueError("Shot end_ms must be greater than start_ms")
         if self.duration_ms != self.end_ms - self.start_ms:
@@ -66,7 +66,7 @@ class Timeline(BaseModel):
     coverage: TimelineCoverage
 
     @model_validator(mode="after")
-    def validate_timeline(self) -> "Timeline":
+    def validate_timeline(self) -> Timeline:
         if self.coverage.start_ms != 0 or self.coverage.end_ms != self.duration_ms:
             raise ValueError("Timeline coverage must span the complete asset")
         if self.coverage.gap_ms != 0 or self.coverage.overlap_ms != 0:

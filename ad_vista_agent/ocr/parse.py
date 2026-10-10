@@ -7,7 +7,6 @@ from difflib import SequenceMatcher
 
 from ad_vista_agent.schemas import BoundingBox, OcrRegion
 
-
 GROUNDING = re.compile(
     r"<\|ref\|>(.*?)<\|/ref\|><\|det\|>(.*?)<\|/det\|>",
     flags=re.DOTALL,
@@ -62,9 +61,7 @@ def _is_usable_plain_text(value: str) -> bool:
         and not re.search(r"[\u4e00-\u9fffA-Za-z]{3,}", semantic_text)
     ):
         return False
-    if len(text) < 2 and not re.search(r"[\u4e00-\u9fffA-Za-z0-9]", text):
-        return False
-    return True
+    return not (len(text) < 2 and not re.search(r"[\u4e00-\u9fffA-Za-z0-9]", text))
 
 
 def parse_deepseek_grounding(raw: str) -> list[OcrRegion]:

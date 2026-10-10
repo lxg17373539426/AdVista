@@ -5,7 +5,13 @@ from pathlib import Path
 from pydantic import SecretStr
 
 from ad_vista_agent.config import DatabaseConfig
-from ad_vista_agent.database import Base, ContextRepository, Database, ExecutionRepository, RequestRepository
+from ad_vista_agent.database import (
+    Base,
+    ContextRepository,
+    Database,
+    ExecutionRepository,
+    RequestRepository,
+)
 
 
 def test_context_versions_are_monotonic_and_preserve_artifact_hashes(tmp_path: Path) -> None:

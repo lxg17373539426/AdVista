@@ -6,7 +6,13 @@ import pytest
 from pydantic import SecretStr
 
 from ad_vista_agent.config import DatabaseConfig
-from ad_vista_agent.database import Base, Database, ExecutionRepository, RequestRepository, UserRepository
+from ad_vista_agent.database import (
+    Base,
+    Database,
+    ExecutionRepository,
+    RequestRepository,
+    UserRepository,
+)
 from ad_vista_agent.database.models import User
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import platform
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +10,6 @@ from .config import Settings
 from .runtime import ArtifactStore, sha256_file
 from .schemas import AdAsset
 from .tools import ToolContext, VideoProbeTool
-
 
 SUPPORTED_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 
@@ -61,7 +60,7 @@ def ingest_video(video_path: Path, settings: Settings) -> dict[str, Any]:
             "schema_version": settings.project.schema_version,
             "run_id": run_id,
             "stage": "stage_1_ingestion",
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "input": {"path": str(source), "sha256": content_hash},
             "artifacts": {"asset": "asset.json"},
             "tools": {"video_probe": settings.tools.ffprobe_executable},

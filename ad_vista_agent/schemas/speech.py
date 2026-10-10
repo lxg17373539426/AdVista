@@ -12,7 +12,7 @@ class TranscriptWord(BaseModel):
     probability: float | None = Field(default=None, ge=0, le=1)
 
     @model_validator(mode="after")
-    def validate_interval(self) -> "TranscriptWord":
+    def validate_interval(self) -> TranscriptWord:
         if self.end_ms < self.start_ms:
             raise ValueError("Word end_ms must be greater than or equal to start_ms")
         return self
@@ -29,7 +29,7 @@ class TranscriptSegment(BaseModel):
     words: list[TranscriptWord] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_interval(self) -> "TranscriptSegment":
+    def validate_interval(self) -> TranscriptSegment:
         if self.end_ms <= self.start_ms:
             raise ValueError("Segment end_ms must be greater than start_ms")
         for word in self.words:
@@ -54,7 +54,7 @@ class SpeechTranscript(BaseModel):
     generation: dict[str, object]
 
     @model_validator(mode="after")
-    def validate_segments(self) -> "SpeechTranscript":
+    def validate_segments(self) -> SpeechTranscript:
         previous_end = 0
         for segment in self.segments:
             if segment.end_ms > self.duration_ms:

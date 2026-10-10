@@ -33,7 +33,7 @@ class BoundingBox(BaseModel):
     y2: float = Field(ge=0, le=1)
 
     @model_validator(mode="after")
-    def validate_order(self) -> "BoundingBox":
+    def validate_order(self) -> BoundingBox:
         if self.x2 <= self.x1 or self.y2 <= self.y1:
             raise ValueError("Bounding box must have positive area")
         return self
@@ -59,7 +59,7 @@ class Evidence(BaseModel):
     metadata: dict[str, object] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_interval(self) -> "Evidence":
+    def validate_interval(self) -> Evidence:
         if self.end_ms < self.start_ms:
             raise ValueError("Evidence end_ms must be greater than or equal to start_ms")
         return self

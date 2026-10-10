@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from ad_vista_agent.schemas import Evidence, EvidenceCluster, EvidenceLedger, EvidenceRelation
+from ad_vista_agent.schemas import (
+    Evidence,
+    EvidenceCluster,
+    EvidenceLedger,
+    EvidenceRelation,
+)
 
 
 def build_ledger_payload(

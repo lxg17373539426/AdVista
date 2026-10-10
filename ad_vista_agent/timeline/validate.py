@@ -8,10 +8,19 @@ from ad_vista_agent.schemas import Keyframe, Timeline
 
 def validate_keyframes(timeline: Timeline, keyframes: list[Keyframe], run_dir: Path) -> None:
     shots = {shot.shot_id: shot for shot in timeline.shots}
-    if len(keyframes) != len(shots):
-        raise ValueError("Each shot must have exactly one primary keyframe")
-    if len({frame.shot_id for frame in keyframes}) != len(keyframes):
-        raise ValueError("Each shot must have only one keyframe in Stage 2")
+    if not keyframes:
+        raise ValueError("Timeline must contain at least one keyframe")
+    frames_by_shot: dict[str, list[Keyframe]] = {}
+    for frame in keyframes:
+        frames_by_shot.setdefault(frame.shot_id, []).append(frame)
+    if set(frames_by_shot) != set(shots):
+        raise ValueError("Each shot must have at least one keyframe")
+    for shot_id, frames in frames_by_shot.items():
+        primary = [frame for frame in frames if frame.role == "primary"]
+        if len(primary) != 1:
+            raise ValueError(f"Each shot must have exactly one primary keyframe: {shot_id}")
+        if len({frame.timestamp_ms for frame in frames}) != len(frames):
+            raise ValueError(f"Keyframe timestamps must be unique within a shot: {shot_id}")
 
     for frame in keyframes:
         shot = shots.get(frame.shot_id)

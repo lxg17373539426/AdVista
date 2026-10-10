@@ -89,3 +89,23 @@ def test_unknown_ocr_reference_is_not_guessed() -> None:
     normalized = normalize_ocr_cluster_references(analysis, {})
 
     assert normalized.insights[0].evidence_refs == ["ocr_cluster_9999"]
+
+
+def test_valid_cluster_reference_is_not_remapped_using_its_member_number() -> None:
+    # Real Ledger numbers diverge once repeated OCR frames are clustered.
+    analysis = MarketingAnalysis.model_validate({
+        "asset_id": "asset_1", "language": "zh", "subject": "测试广告",
+        "executive_summary": "", "unknowns": [], "insights": [{
+            "insight_id": "selling_01", "dimension": "selling_point",
+            "claim": "广告显示 contact points。", "confidence": 0.8,
+            "epistemic_status": "stated_by_ad", "reasoning_summary": "依据字幕。",
+            "evidence_refs": ["ocr_cluster_0015", "ocr_0015"],
+        }],
+    })
+    normalized = normalize_ocr_cluster_references(analysis, {
+        "ocr_0015": "ocr_cluster_0014", "ocr_0016": "ocr_cluster_0015",
+    })
+    assert normalized.insights[0].evidence_refs == ["ocr_cluster_0015", "ocr_cluster_0014"]
+    assert normalize_ocr_cluster_references(normalized, {
+        "ocr_0015": "ocr_cluster_0014", "ocr_0016": "ocr_cluster_0015",
+    }) == normalized

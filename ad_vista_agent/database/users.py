@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import delete, select
 
 from .connection import Database
-from .models import AnswerVersion, ContextVersion, Conversation, Execution, Feedback, Message, Request, ToolCall, User
+from .models import (
+    AnswerVersion,
+    ArtifactReference,
+    ContextVersion,
+    Conversation,
+    Execution,
+    Feedback,
+    Message,
+    Request,
+    ToolCall,
+    User,
+)
 
 
 def hash_api_key(api_key: str) -> str:
@@ -29,7 +40,7 @@ class UserRepository:
             credential_hash=hash_api_key(api_key),
             role=role,
             status="active",
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         with self.database.session() as session:
             session.add(user)
@@ -48,7 +59,7 @@ class UserRepository:
             )
             if user is None:
                 return None
-            user.last_login_at = datetime.now(timezone.utc)
+            user.last_login_at = datetime.now(UTC)
             session.flush()
             session.expunge(user)
             return user
@@ -78,6 +89,7 @@ class UserRepository:
             execution_ids = [item.execution_id for item in executions]
             if execution_ids:
                 session.execute(delete(ToolCall).where(ToolCall.execution_id.in_(execution_ids)))
+                session.execute(delete(ArtifactReference).where(ArtifactReference.execution_id.in_(execution_ids)))
             if conversation_ids:
                 session.execute(delete(ContextVersion).where(ContextVersion.conversation_id.in_(conversation_ids)))
                 session.execute(delete(AnswerVersion).where(AnswerVersion.conversation_id.in_(conversation_ids)))

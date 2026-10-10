@@ -4,8 +4,8 @@ import base64
 import json
 import mimetypes
 import shutil
-import uuid
 import time
+import uuid
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -13,8 +13,10 @@ from pydantic import BaseModel
 
 from ad_vista_agent.config import Settings
 from ad_vista_agent.context import build_context_budget, compress_evidence_context
+from ad_vista_agent.errors import AnalysisGroundingError
 from ad_vista_agent.ingestion import ingest_video
 from ad_vista_agent.runtime import ArtifactStore, sha256_file
+from ad_vista_agent.runtime.process import ProcessCancelled
 from ad_vista_agent.runtime.stage_cache import stage_cache_key
 from ad_vista_agent.schemas import (
     AgentRequest,
@@ -25,8 +27,9 @@ from ad_vista_agent.schemas import (
     Keyframe,
     MarketingAnalysis,
 )
-from ad_vista_agent.tools import QwenInsightTool, ToolContext
 from ad_vista_agent.skills import task_skill_prompt
+from ad_vista_agent.tools import QwenInsightTool, ToolContext
+from ad_vista_agent.tools.qwen import UNKNOWN_RUNTIME_VERSIONS
 
 from .grounding import (
     grounded_executive_summary,
@@ -36,8 +39,7 @@ from .grounding import (
 )
 from .payload import build_ledger_payload
 
-
-INSIGHT_PIPELINE_VERSION = "6"
+INSIGHT_PIPELINE_VERSION = "8"
 QWEN_VERSIONS = {"vllm": "0.19.1", "torch": "2.10.0", "transformers": "5.13.0"}
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -102,8 +104,7 @@ def _extract_json(text: str) -> dict[str, Any]:
         value = value[7:]
     elif value.startswith("```"):
         value = value[3:]
-    if value.endswith("```"):
-        value = value[:-3]
+    value = value.removesuffix("```")
     value = value.strip()
     try:
         result = json.loads(value)
@@ -113,7 +114,7 @@ def _extract_json(text: str) -> dict[str, Any]:
             raise ValueError("Qwen output does not contain a JSON object")
         result = json.loads(value[start : end + 1])
     if not isinstance(result, dict):
-        raise ValueError("Qwen output must be a JSON object")
+        raise ValueError("Qwen output must be a JSON object")  # noqa: TRY004 — 保留对文件内容验证的 ValueError 契约。
     return result
 
 
@@ -203,7 +204,9 @@ def _visual_observations(
             prompt_tokens += result.prompt_tokens
             completion_tokens += result.completion_tokens
             parsed = FrameObservationBatch.model_validate(_extract_json(result.text))
-        except Exception as exc:
+        except ProcessCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 — 记录外部调用或线程异常，允许降级或交回调用线程。
             attempts.append(f"visual_batch_failed:{label}:{type(exc).__name__}")
             if len(batch) > 1:
                 midpoint = max(1, len(batch) // 2)
@@ -260,7 +263,7 @@ def _cache_payload(
         "schema_version": settings.project.schema_version,
         "insight_pipeline_version": INSIGHT_PIPELINE_VERSION,
         "model": _runtime_model_identity(settings),
-        "runtime_versions": QWEN_VERSIONS,
+        "runtime_versions": QWEN_VERSIONS if settings.insight.runtime == "subprocess" else UNKNOWN_RUNTIME_VERSIONS,
         "ledger_artifacts": {path.name: sha256_file(path) for path in ledger_paths},
         "prompt_sha256": sha256_file(prompt_path),
         "generation": {
@@ -432,9 +435,7 @@ def build_insights(
     analysis_path.unlink(missing_ok=True)
     metrics_path.unlink(missing_ok=True)
     inference_started = time.perf_counter()
-    result = tool.run(
-        ToolContext(run_id=run_id, run_dir=run_dir),
-        {
+    arguments = {
             "model_path": str(settings.model_path(settings.insight.model)),
             "gpu_memory_utilization": settings.insight.gpu_memory_utilization,
             "max_model_len": settings.insight.max_model_len,
@@ -442,35 +443,86 @@ def build_insights(
             "temperature": settings.insight.temperature,
             "messages": messages,
             "output_schema": MarketingAnalysis.model_json_schema(),
-        },
-    )
-    inference_seconds = time.perf_counter() - inference_started
-    if result.versions != QWEN_VERSIONS:
+        }
+    context = ToolContext(run_id=run_id, run_dir=run_dir)
+    result = tool.run(context, arguments)
+    if settings.insight.runtime == "subprocess" and result.versions != QWEN_VERSIONS:
         raise RuntimeError(f"Unexpected Qwen worker versions: {result.versions}")
-    store.write_json(
-        raw_path,
-        {
-            "attempts": visual_attempts + result.attempts,
-            "attempt_count": len(visual_attempts) + result.attempt_count,
-            "selected_attempt": len(visual_attempts) + result.attempt_count - 1,
+    analysis_attempts = list(result.attempts)
+    prompt_tokens = result.prompt_tokens
+    completion_tokens = result.completion_tokens
+    grounding_repair: dict[str, Any] = {"attempt_count": 0, "validation_errors": []}
+
+    def save_raw() -> None:
+        store.write_json(raw_path, {
+            "attempts": visual_attempts + analysis_attempts,
+            "attempt_count": len(visual_attempts) + len(analysis_attempts),
+            "selected_attempt": len(visual_attempts) + len(analysis_attempts) - 1,
             "versions": result.versions,
-        },
-    )
-    try:
-        parsed = _extract_json(result.text)
-        analysis = normalize_ocr_cluster_references(
-            normalize_inline_citations(MarketingAnalysis.model_validate(parsed)),
+            "grounding_repair": grounding_repair,
+        })
+
+    def validated_analysis(text: str) -> MarketingAnalysis:
+        candidate = normalize_ocr_cluster_references(
+            normalize_inline_citations(MarketingAnalysis.model_validate(_extract_json(text))),
             evidence_to_cluster,
         )
-    except Exception as exc:
-        raise ValueError(f"Qwen structured output remained invalid after repair: {exc}") from exc
-    validate_analysis_grounding(
-        analysis,
-        asset_id=ledger.asset_id,
-        allowed_references=allowed_refs,
-        max_per_dimension=max_insights,
-        reference_content=reference_content,
-    )
+        validate_analysis_grounding(
+            candidate,
+            asset_id=ledger.asset_id,
+            allowed_references=allowed_refs,
+            max_per_dimension=max_insights,
+            reference_content=reference_content,
+        )
+        return candidate
+
+    save_raw()
+    try:
+        analysis = validated_analysis(result.text)
+    except ValueError as exc:
+        # Syntax-only repair in the inference tool cannot resolve citation,
+        # schema or cross-language grounding errors. Allow one content repair
+        # against the same Ledger; never relax the validator or retry forever.
+        grounding_repair.update(attempt_count=1, status="pending", validation_errors=[str(exc)])
+        save_raw()
+        repair_feedback = {
+            "validation_error": str(exc),
+            "asset_id": ledger.asset_id,
+            "allowed_references": sorted(allowed_refs),
+        }
+        result = tool.run(context, {
+            **arguments,
+            "messages": messages + [
+                {"role": "assistant", "content": result.text},
+                {"role": "user", "content": (
+                    "上面的草稿未通过校验。请根据同一份 Ledger 修正，返回完整 JSON。"
+                    "证据编号原样复制；不要将合法 OCR Cluster ID 改成成员编号。"
+                    "中文解读外文 OCR 时，在 claim 中保留一小段准确的原文引用作为可核对依据。"
+                    "引用必须真正支持结论，不能只拼接无关原文来通过词语检查。"
+                    "广告口号不等于已证实的产品功效；营销解读使用 inferred_from_ad。"
+                    "无法获得证据支持的结论请删除，并在 unknowns 中说明缺口，"
+                    "每项以‘当前 Ledger 无证据表明’开头。不得编造新证据或人物敏感属性。\n"
+                    + json.dumps(repair_feedback, ensure_ascii=False)
+                )},
+            ],
+        })
+        if settings.insight.runtime == "subprocess" and result.versions != QWEN_VERSIONS:
+            raise RuntimeError(f"Unexpected Qwen worker versions: {result.versions}")
+        analysis_attempts.extend(result.attempts)
+        prompt_tokens += result.prompt_tokens
+        completion_tokens += result.completion_tokens
+        try:
+            analysis = validated_analysis(result.text)
+        except ValueError as repair_exc:
+            grounding_repair["validation_errors"].append(str(repair_exc))
+            grounding_repair["status"] = "failed"
+            save_raw()
+            raise AnalysisGroundingError(
+                f"Marketing analysis validation remained invalid after grounding repair: {repair_exc}"
+            ) from repair_exc
+        grounding_repair["status"] = "repaired"
+        save_raw()
+    inference_seconds = time.perf_counter() - inference_started
     analysis = analysis.model_copy(
         update={"executive_summary": grounded_executive_summary(analysis)}
     )
@@ -482,9 +534,10 @@ def build_insights(
         "cache_key": cache_key,
         "cache_payload": cache_payload,
         "cache_hit": False,
-        "prompt_tokens": visual_prompt_tokens + result.prompt_tokens,
-        "completion_tokens": visual_completion_tokens + result.completion_tokens,
-        "attempt_count": len(visual_attempts) + result.attempt_count,
+        "prompt_tokens": visual_prompt_tokens + prompt_tokens,
+        "completion_tokens": visual_completion_tokens + completion_tokens,
+        "attempt_count": len(visual_attempts) + len(analysis_attempts),
+        "grounding_repair": grounding_repair,
         "insight_count": len(analysis.insights),
         "dimension_counts": {
             dimension: sum(item.dimension.value == dimension for item in analysis.insights)
@@ -528,7 +581,7 @@ def build_insights(
     )
     stages_value = manifest.setdefault("stages", {})
     if not isinstance(stages_value, dict):
-        raise ValueError("Manifest stages must be an object")
+        raise ValueError("Manifest stages must be an object")  # noqa: TRY004 — 保留对文件内容验证的 ValueError 契约。
     stages: dict[str, Any] = stages_value
     stages["stage_6_insights"] = {
         "cache_key": cache_key,

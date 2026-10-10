@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select
@@ -12,7 +12,7 @@ from .models import Conversation, Message, Request, User
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class RequestRepository:
@@ -65,6 +65,8 @@ class RequestRepository:
                 session.flush()
             elif conversation.user_id != user_id:
                 raise PermissionError("Conversation does not belong to the authenticated user")
+            elif conversation.deleted_at is not None:
+                raise FileNotFoundError("Unknown conversation session")
             session.expunge(conversation)
             return conversation
 
@@ -79,6 +81,14 @@ class RequestRepository:
         idempotency_key: str,
     ) -> tuple[Request, bool]:
         with self.database.session() as session:
+            if conversation_id is not None:
+                conversation = session.scalar(
+                    select(Conversation).where(Conversation.conversation_id == conversation_id).with_for_update()
+                )
+                if conversation is None or conversation.user_id != user_id:
+                    raise PermissionError("Conversation does not belong to the authenticated user")
+                if conversation.deleted_at is not None:
+                    raise FileNotFoundError("Unknown conversation session")
             existing = session.scalar(
                 select(Request).where(
                     Request.user_id == user_id,
@@ -86,6 +96,10 @@ class RequestRepository:
                 )
             )
             if existing is not None:
+                if existing.conversation_id is not None:
+                    previous = session.get(Conversation, existing.conversation_id)
+                    if previous is not None and previous.deleted_at is not None:
+                        raise FileNotFoundError("Unknown conversation session")
                 session.expunge(existing)
                 return existing, False
             request = Request(
@@ -111,6 +125,10 @@ class RequestRepository:
                 )
                 if existing is None:
                     raise
+                for identifier in {conversation_id, existing.conversation_id} - {None}:
+                    conversation = session.get(Conversation, identifier)
+                    if conversation is not None and conversation.deleted_at is not None:
+                        raise FileNotFoundError("Unknown conversation session")
                 session.expunge(existing)
                 return existing, False
             session.expunge(request)
@@ -175,9 +193,17 @@ class RequestRepository:
         status: str,
     ) -> Message:
         with self.database.session() as session:
-            conversation = session.get(Conversation, conversation_id)
+            # Serialize sequence allocation against every writer to this
+            # conversation, including PostgresConversationStore.
+            conversation = session.scalar(
+                select(Conversation)
+                .where(Conversation.conversation_id == conversation_id)
+                .with_for_update()
+            )
             if conversation is None or conversation.user_id != user_id:
                 raise PermissionError("Conversation does not belong to the authenticated user")
+            if conversation.deleted_at is not None:
+                raise FileNotFoundError("Unknown conversation session")
             next_sequence = session.scalar(
                 select(func.coalesce(func.max(Message.sequence_no), 0) + 1).where(
                     Message.conversation_id == conversation_id
@@ -274,6 +300,8 @@ class RequestRepository:
             conversation = session.get(Conversation, conversation_id)
             if conversation is None or conversation.user_id != user_id:
                 raise PermissionError("Conversation does not belong to the authenticated user")
+            if conversation.deleted_at is not None:
+                raise FileNotFoundError("Unknown conversation session")
             values = list(
                 session.scalars(
                     select(Message)
