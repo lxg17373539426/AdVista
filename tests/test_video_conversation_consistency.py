@@ -22,6 +22,7 @@ from ad_vista_agent.web.service import WebService
 def video(tmp_path, monkeypatch):
     base = load_settings()
     url = os.environ.get("ADVISTA_VIDEO_TEST_DATABASE_URL")
+    schema = None
     if url:
         # The disposable PostgreSQL harness supplies this URL; every test gets its own schema.
         schema = f"review_{uuid.uuid4().hex}"
@@ -91,6 +92,13 @@ def video(tmp_path, monkeypatch):
         yield service, settings, state
     finally:
         service.close()
+        if schema is not None:
+            cleanup = Database(DatabaseConfig(url=SecretStr(url)))
+            try:
+                with cleanup.engine.begin() as connection:
+                    connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+            finally:
+                cleanup.close()
 
 
 def test_answer_history_and_feedback_share_database_message_identity(video):
@@ -119,6 +127,69 @@ def test_answer_history_and_feedback_share_database_message_identity(video):
             == result["assistant_message_id"]
         )
     assert not chat.conversation_db(settings).exists()
+
+
+def test_marketing_report_uses_current_task_and_restores_export_in_history(video, monkeypatch, tmp_path):
+    service, settings, state = video
+    calls = []
+    strategy = {
+        "positioning": "当前语音和 OCR 无法确认产品定位。",
+        "target_audience": "待验证假设：需要补充目标人群。",
+        "core_message": "补充与产品相关的广告信息后再提炼。",
+        "communication_strategy": ["建议先核实商品与广告主张。"],
+        "content_directions": ["建议补充清晰商品字幕。"],
+        "channel_recommendations": ["待验证假设：小规模测试渠道。"],
+        "conversion_recommendations": ["建议先确认真实购买路径。"],
+        "evidence_refs": [],
+        "unsupported_points": ["语音为背景音乐，OCR 无有效产品文字。"],
+    }
+    output = tmp_path / "strategy.json"
+    output.write_text(__import__("json").dumps(strategy, ensure_ascii=False))
+
+    def build(video_path, config, **kwargs):
+        calls.append(kwargs["request"])
+        assert video_path == state.source_path
+        assert kwargs["artifact_root"].name == "artifacts"
+        return {"strategy": str(output)}
+
+    monkeypatch.setattr(chat, "build_strategy", build)
+    monkeypatch.setattr(chat, "_qwen_answer", lambda *args, **kwargs: pytest.fail("报告不应走自由文本问答"))
+    result = service.chat(
+        "exec_00000000000000000000000000000000", "我需要一个营销报告",
+        user_id="system", idempotency_key="marketing-report",
+    )
+    assert calls[0].goal == "我需要一个营销报告"
+    assert calls[0].deliverables == ["strategy"]
+    assert result["report_url"].endswith("/exports/marketing-html")
+    messages = chat.show_conversation("asset_video", settings)["messages"]
+    assert messages[-1]["report_url"] == result["report_url"]
+    assert messages[-1]["report_label"] == "查看营销报告"
+    assert messages[-1]["epistemic_status"] == "conversational"
+    assert messages[-1]["unsupported_points"] == strategy["unsupported_points"]
+
+
+def test_selling_report_runs_skills_with_followup_goal(video, monkeypatch, tmp_path):
+    service, settings, state = video
+    calls = []
+    artifact_root = settings.paths.output_root / "executions" / state.execution_id / "artifacts"
+    (artifact_root / "critic").mkdir(parents=True)
+    (artifact_root / "critic" / "audit.json").write_text('{"insights": []}')
+
+    def insights(*args, **kwargs):
+        calls.append(("insights", kwargs["request"].goal))
+
+    def report(*args, **kwargs):
+        calls.append(("report", kwargs["request"].goal))
+        return {"insight_count": 2}
+
+    monkeypatch.setattr(chat, "build_insights", insights)
+    monkeypatch.setattr(chat, "build_report", report)
+    result = service.chat(
+        "exec_00000000000000000000000000000000", "直接总结一个卖点解析报告",
+        user_id="system", idempotency_key="selling-report",
+    )
+    assert calls == [("insights", "直接总结一个卖点解析报告"), ("report", "直接总结一个卖点解析报告")]
+    assert result["report_url"].endswith("/exports/report-html")
 
 
 def test_completed_retry_replays_full_response_without_generating_again(

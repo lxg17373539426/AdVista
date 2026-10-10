@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .metadata import answer_metadata
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -176,8 +178,21 @@ class ConversationStore:
                 FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?""",
                 (session_id, limit),
             ).fetchall()
+            versions = connection.execute(
+                """SELECT message_id, answer_json FROM answer_versions
+                WHERE session_id = ? AND message_id IN (
+                    SELECT message_id FROM messages WHERE session_id = ?
+                    ORDER BY created_at DESC LIMIT ?
+                ) ORDER BY created_at, rowid""",
+                (session_id, session_id, limit),
+            ).fetchall()
+            latest = {
+                row["message_id"]: answer_metadata(json.loads(row["answer_json"]))
+                for row in versions
+            }
         return [
             {
+                **latest.get(row["message_id"], {}),
                 "message_id": row["message_id"],
                 "role": row["role"],
                 "content": row["content"],
@@ -198,14 +213,14 @@ class ConversationStore:
         return dict(row)
 
     def list_sessions(
-        self, *, general_only: bool = False, limit: int = 100
+        self, *, general_only: bool = False, limit: int = 100, offset: int = 0
     ) -> list[dict[str, Any]]:
         query = "SELECT * FROM sessions WHERE deleted_at IS NULL"
         if general_only:
             query += " AND run_id LIKE 'general\\_%' ESCAPE '\\'"
-        query += " ORDER BY updated_at DESC, session_id LIMIT ?"
+        query += " ORDER BY updated_at DESC, session_id LIMIT ? OFFSET ?"
         with self._connect() as connection:
-            rows = connection.execute(query, (max(0, limit),)).fetchall()
+            rows = connection.execute(query, (max(0, limit), max(0, offset))).fetchall()
         return [dict(row) for row in rows]
 
     def set_title(

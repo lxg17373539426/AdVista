@@ -7,6 +7,13 @@ from pathlib import Path
 import pytest
 
 SCENARIOS = (
+    "refreshKeepsCurrentOlderConversation",
+    "loadOlderConversations",
+    "olderHistoryFailureCanRetry",
+    "restoredReportsAndUnsafeLinks",
+    "historyScrollControls",
+    "currentHistoryRevealsFilteredVideo",
+    "videoNavigationRevealsHistory",
     "staleHeaders",
     "staleDoneAndController",
     "staleFinally",

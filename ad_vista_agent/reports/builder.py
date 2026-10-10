@@ -30,7 +30,7 @@ from ad_vista_agent.skills import (
 from .critic import audit_analysis
 from .render import render_html_report, render_markdown_report
 
-REPORT_PIPELINE_VERSION = "7"
+REPORT_PIPELINE_VERSION = "8"
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
@@ -57,6 +57,7 @@ def _cache_payload(
         "report_pipeline_version": REPORT_PIPELINE_VERSION,
         "frontend_skill": REPORT_FRONTEND_SKILL,
         "frontend_skill_sha256": report_frontend_skill_fingerprint(),
+        "renderer_sha256": sha256_file(Path(__file__).with_name("render.py")),
         "source_artifacts": {path.name: sha256_file(path) for path in artifacts},
         "report": settings.report.model_dump(mode="json"),
         "task": request.model_dump(mode="json") if request is not None else None,
@@ -84,6 +85,7 @@ def build_report(
     force: bool = False,
     request: AgentRequest | None = None,
     artifact_root: Path | None = None,
+    allow_empty: bool = False,
 ) -> dict[str, Any]:
     total_started = time.perf_counter()
     ingestion = ingest_video(video_path, settings)
@@ -119,7 +121,7 @@ def build_report(
     metrics_path = output_root / "stage_7_metrics.json"
     manifest_path = output_root / "manifest.json"
     analysis = MarketingAnalysis.model_validate(store.read_json(analysis_path))
-    if not analysis.insights:
+    if not analysis.insights and not allow_empty:
         raise ValueError(
             "当前视频没有形成可验证的广告卖点，无法生成报告。请先检查语音、OCR 和关键帧证据。"
         )

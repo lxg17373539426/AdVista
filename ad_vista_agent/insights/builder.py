@@ -38,8 +38,13 @@ from .grounding import (
     validate_analysis_grounding,
 )
 from .payload import build_ledger_payload
+from .text_sources import (
+    filter_product_text,
+    omit_visual_only_audiences,
+    review_text_sources,
+)
 
-INSIGHT_PIPELINE_VERSION = "8"
+INSIGHT_PIPELINE_VERSION = "10"
 QWEN_VERSIONS = {"vllm": "0.19.1", "torch": "2.10.0", "transformers": "5.13.0"}
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -320,6 +325,8 @@ def build_insights(
     published_raw_path = output_dir / "raw_response.json"
     published_visual_observations_path = output_dir / "visual_observations.json"
     published_analysis_path = output_dir / "analysis.json"
+    text_source_review_path = staging_dir / "text_source_review.json"
+    published_text_source_review_path = output_dir / "text_source_review.json"
     metrics_path = output_root / "stage_6_metrics.json"
     manifest_path = output_root / "manifest.json"
     max_insights = settings.insight.max_insights_per_dimension
@@ -362,7 +369,13 @@ def build_insights(
             and artifact_hashes.get("analysis") == sha256_file(published_analysis_path)
             and artifact_hashes.get("visual_observations") == sha256_file(published_visual_observations_path)
             and artifact_hashes.get("raw_response") == sha256_file(published_raw_path)
+            and published_text_source_review_path.is_file()
+            and artifact_hashes.get("text_source_review") == sha256_file(published_text_source_review_path)
         ):
+            cached_review = store.read_json(published_text_source_review_path)
+            allowed_refs = set(cached_review["allowed_product_references"]) | {
+                item.keyframe_id for item in keyframes
+            }
             analysis = normalize_ocr_cluster_references(
                 MarketingAnalysis.model_validate(store.read_json(published_analysis_path)),
                 evidence_to_cluster,
@@ -409,6 +422,24 @@ def build_insights(
     visual_observations, visual_attempts, visual_prompt_tokens, visual_completion_tokens = _visual_observations(
         run_dir, keyframes, settings, tool, run_id
     )
+    text_review = review_text_sources(
+        ledger_payload,
+        visual_observations=[item.model_dump(mode="json") for item in visual_observations],
+        settings=settings,
+        tool=tool,
+        context=ToolContext(run_id=run_id, run_dir=run_dir),
+    )
+    store.write_json(text_source_review_path, text_review)
+    allowed_refs = set(text_review["allowed_product_references"]) | {
+        item.keyframe_id for item in keyframes
+    }
+    ledger_payload = filter_product_text(ledger_payload, text_review)
+    prompt += (
+        "\n文字来源已经独立审查：只有 product_information 可支持商品主张。"
+        "被排除的 background_audio、unrelated_text、uncertain 不能引用或用于推断手机、包装、材质、人群。"
+        "没有商品文字证据时仍可描述关键帧可见的颜色、形状、动作或剪辑；这些是画面观察，"
+        "不得升级为产品材质、功效、年龄画像或凭歌词猜测商品身份。"
+    )
     store.write_json(
         visual_observations_path,
         {"observations": [item.model_dump(mode="json") for item in visual_observations]},
@@ -419,6 +450,7 @@ def build_insights(
             "evidence_ledger": ledger_payload,
             "visual_observations": [item.model_dump(mode="json") for item in visual_observations],
             "allowed_keyframe_ids": [item.keyframe_id for item in keyframes],
+            "text_source_review": {"sources": text_review["sources"]},
         },
         str(task_payload.get("goal") or "广告卖点分析"),
         build_context_budget(settings),
@@ -455,11 +487,12 @@ def build_insights(
 
     def save_raw() -> None:
         store.write_json(raw_path, {
-            "attempts": visual_attempts + analysis_attempts,
-            "attempt_count": len(visual_attempts) + len(analysis_attempts),
-            "selected_attempt": len(visual_attempts) + len(analysis_attempts) - 1,
+            "attempts": visual_attempts + text_review["attempts"] + analysis_attempts,
+            "attempt_count": len(visual_attempts) + len(text_review["attempts"]) + len(analysis_attempts),
+            "selected_attempt": len(visual_attempts) + len(text_review["attempts"]) + len(analysis_attempts) - 1,
             "versions": result.versions,
             "grounding_repair": grounding_repair,
+            "selected_model_response": result.text,
         })
 
     def validated_analysis(text: str) -> MarketingAnalysis:
@@ -523,9 +556,22 @@ def build_insights(
         grounding_repair["status"] = "repaired"
         save_raw()
     inference_seconds = time.perf_counter() - inference_started
+    analysis, omitted_visual_audiences = omit_visual_only_audiences(analysis)
     analysis = analysis.model_copy(
         update={"executive_summary": grounded_executive_summary(analysis)}
     )
+    excluded_text_count = sum(
+        item["classification"] != "product_information" for item in text_review["sources"]
+    )
+    if excluded_text_count:
+        analysis = analysis.model_copy(update={
+            "unknowns": analysis.unknowns + [
+                (
+                    f"当前 Ledger 无证据表明 {excluded_text_count} 条被审查排除的背景音轨、无关或不确定文字支持商品卖点；"
+                    "其原始记录保留，相关性审查理由见文字来源审查记录。"
+                )
+            ],
+        })
     store.write_json(analysis_path, analysis)
     total_seconds = time.perf_counter() - total_started
     metrics = {
@@ -534,10 +580,12 @@ def build_insights(
         "cache_key": cache_key,
         "cache_payload": cache_payload,
         "cache_hit": False,
-        "prompt_tokens": visual_prompt_tokens + prompt_tokens,
-        "completion_tokens": visual_completion_tokens + completion_tokens,
-        "attempt_count": len(visual_attempts) + len(analysis_attempts),
+        "prompt_tokens": visual_prompt_tokens + text_review["prompt_tokens"] + prompt_tokens,
+        "completion_tokens": visual_completion_tokens + text_review["completion_tokens"] + completion_tokens,
+        "attempt_count": len(visual_attempts) + len(text_review["attempts"]) + len(analysis_attempts),
+        "text_source_review": {"sources": text_review["sources"], "allowed_product_references": text_review["allowed_product_references"]},
         "grounding_repair": grounding_repair,
+        "omitted_visual_audience_ids": omitted_visual_audiences,
         "insight_count": len(analysis.insights),
         "dimension_counts": {
             dimension: sum(item.dimension.value == dimension for item in analysis.insights)
@@ -564,6 +612,7 @@ def build_insights(
             "analysis": sha256_file(analysis_path),
             "visual_observations": sha256_file(visual_observations_path),
             "raw_response": sha256_file(raw_path),
+            "text_source_review": sha256_file(text_source_review_path),
         },
     }
     store.publish_directory(staging_dir, output_dir)
@@ -572,6 +621,7 @@ def build_insights(
             "analysis": sha256_file(published_analysis_path),
             "visual_observations": sha256_file(published_visual_observations_path),
             "raw_response": sha256_file(published_raw_path),
+            "text_source_review": sha256_file(published_text_source_review_path),
     }
     store.write_json(metrics_path, metrics)
     manifest: dict[str, Any] = (
@@ -591,6 +641,7 @@ def build_insights(
             "visual_observations": "insights/visual_observations.json",
             "raw_response": "insights/raw_response.json",
             "metrics": "stage_6_metrics.json",
+            "text_source_review": "insights/text_source_review.json",
         },
     }
     store.write_json(manifest_path, manifest)

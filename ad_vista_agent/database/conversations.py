@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import func, or_, select, update
 
 from ad_vista_agent.errors import ConversationBusyError
+from ad_vista_agent.memory.metadata import answer_metadata
 
 from .connection import Database
 from .models import (
@@ -300,8 +301,21 @@ class PostgresConversationStore:
                     .limit(limit)
                 )
             )
+            versions = session.scalars(
+                select(AnswerVersion)
+                .where(
+                    AnswerVersion.conversation_id == session_id,
+                    AnswerVersion.message_id.in_([row.message_id for row in rows]),
+                )
+                .order_by(AnswerVersion.created_at, AnswerVersion.version_id)
+            )
+            latest = {
+                version.message_id: answer_metadata(version.answer_json)
+                for version in versions
+            }
             return [
                 {
+                    **latest.get(row.message_id, {}),
                     "message_id": row.message_id,
                     "request_id": row.request_id,
                     "role": row.role,
@@ -329,7 +343,7 @@ class PostgresConversationStore:
             }
 
     def list_sessions(
-        self, *, general_only: bool = False, limit: int = 100
+        self, *, general_only: bool = False, limit: int = 100, offset: int = 0
     ) -> list[dict[str, Any]]:
         with self.database.session() as session:
             query = select(Conversation).where(
@@ -344,7 +358,7 @@ class PostgresConversationStore:
             rows = session.scalars(
                 query.order_by(
                     Conversation.updated_at.desc(), Conversation.conversation_id
-                ).limit(max(0, limit))
+                ).limit(max(0, limit)).offset(max(0, offset))
             )
             return [
                 {

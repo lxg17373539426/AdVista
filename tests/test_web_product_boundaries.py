@@ -204,15 +204,15 @@ def test_marketing_requests_are_not_routed_to_generic_report() -> None:
     chat = (STATIC.parents[1] / "agent" / "chat.py").read_text(encoding="utf-8")
 
     assert "def _is_marketing_request" in chat
-    assert 'elif _is_direct_marketing_summary(value) or _is_marketing_request(value):' in chat
-    assert 'intent="answer" if direct_summary else "marketing"' in chat
-    assert 'output_dir / "marketing.html"' in chat
+    assert "build_strategy(" in chat
     assert '"marketing-html"' in (STATIC.parents[1] / "web" / "app.py").read_text(encoding="utf-8")
     assert _is_marketing_request("我需要的是营销报告")
     assert _is_marketing_request("请给我一份产品推广方案")
     assert _is_report_request("我需要的是营销报告")
     assert _is_direct_marketing_summary("这个视频的卖点是什么呢？我不需要报告，直接总结给我就好了。")
     assert not _is_report_request("这个视频的卖点是什么呢？我不需要报告，直接总结给我就好了。")
+    assert _is_report_request("直接总结一个卖点解析报告")
+    assert not _is_direct_marketing_summary("直接总结一个卖点解析报告")
 
 
 def test_general_chat_persists_and_restores_session() -> None:

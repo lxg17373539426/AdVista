@@ -63,6 +63,16 @@ def responses(monkeypatch, drafts):
     calls = []
 
     def run(self, context, arguments):
+        if arguments["output_schema"]["title"] == "TextSourceReview":
+            sources = json.loads(arguments["messages"][-1]["content"])["sources"]
+            return QwenInsightResult(
+                text=json.dumps({"sources": [
+                    {"reference_id": item["reference_id"], "classification": "product_information", "reason": "广告字幕主张"}
+                    for item in sources
+                ]}),
+                attempts=[], attempt_count=1, prompt_tokens=0, completion_tokens=0,
+                versions={name: "unknown" for name in ("vllm", "torch", "transformers")},
+            )
         calls.append(arguments)
         text = json.dumps(drafts[len(calls) - 1], ensure_ascii=False)
         return QwenInsightResult(

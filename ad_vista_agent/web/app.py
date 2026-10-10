@@ -297,9 +297,11 @@ class _Handler(BaseHTTPRequestHandler):
                     session_id, user_id=(self._identity() or {}).get("user_id"),
                 ))
             if parts == ["api", "conversations"]:
-                return self._send_json({"conversations": self.service.conversations(
+                return self._send_json(self.service.conversation_page(
                     user_id=(self._identity() or {}).get("user_id"),
-                )})
+                    limit=int(query.get("limit", ["100"])[0]),
+                    offset=int(query.get("offset", ["0"])[0]),
+                ))
             if parts == ["api", "admin", "executions"]:
                 if not self._require_admin():
                     return
@@ -544,6 +546,8 @@ class _Handler(BaseHTTPRequestHandler):
                             "unsupported_points": result.get("unsupported_points", []),
                             "context_version": result.get("context_version"),
                             "citations": result.get("citations", []),
+                            "confirmation_required": result.get("confirmation_required", False),
+                            "confirmations": result.get("confirmations", []),
                         },
                     }
                 )

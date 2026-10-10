@@ -76,6 +76,28 @@ def _session(store, identifier="general_one"):
     )
 
 
+def test_message_history_restores_latest_report_metadata_without_replacing_identity(store):
+    _session(store)
+    message_id = store.add_message("general_one", "assistant", "已生成报告", [])
+    store.add_version("general_one", message_id, {
+        "report_url": "/api/runs/first/exports/report-html",
+        "epistemic_status": "unknown",
+        "message_id": "forged-id", "content": "错误覆盖",
+    })
+    store.add_version("general_one", message_id, {
+        "report_url": "/api/runs/first/exports/marketing-html",
+        "report_label": "查看营销报告", "epistemic_status": "conversational",
+        "unsupported_points": ["缺少价格"],
+    })
+    history = store.messages("general_one")
+    assert history[0]["message_id"] == message_id
+    assert history[0]["content"] == "已生成报告"
+    assert history[0]["report_url"].endswith("marketing-html")
+    assert history[0]["report_label"] == "查看营销报告"
+    assert history[0]["unsupported_points"] == ["缺少价格"]
+    assert history[0]["epistemic_status"] == "conversational"
+
+
 def test_title_persists_without_session_recreation_overwriting_it(store):
     _session(store)
     assert store.set_title("general_one", "用户自定标题") == "用户自定标题"

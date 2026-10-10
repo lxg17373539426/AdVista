@@ -33,6 +33,19 @@ def test_inline_citation_ids_are_moved_out_of_user_facing_text() -> None:
     assert "speech_" not in normalized.insights[0].reasoning_summary
     assert normalized.insights[0].evidence_refs == ["speech_0002", "speech_0003"]
 
+    fragments = analysis.model_copy(update={"insights": [analysis.insights[0].model_copy(update={
+        "claim": "多种穿搭（kf_0001_primary, kf_0002_primary）。",
+        "reasoning_summary": "来自关键帧（参考证据：kf_0001_primary，kf_0002_primary）与字幕[ocr_cluster_0001, ocr_cluster_0002]。",
+    })]})
+    cleaned = normalize_inline_citations(fragments)
+    assert cleaned.insights[0].claim == "多种穿搭。"
+    assert cleaned.insights[0].reasoning_summary == "来自关键帧与字幕。"
+    visual_inference = analysis.model_copy(update={"insights": [analysis.insights[0].model_copy(update={
+        "claim": "展示多种搭配，暗示产品百搭。",
+        "evidence_refs": ["kf_0001_primary"], "epistemic_status": "observed",
+    })]})
+    assert normalize_inline_citations(visual_inference).insights[0].epistemic_status == "inferred_from_ad"
+
 
 def test_ocr_member_reference_is_mapped_to_its_actual_cluster() -> None:
     analysis = MarketingAnalysis.model_validate(

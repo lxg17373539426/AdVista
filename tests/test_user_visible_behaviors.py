@@ -13,6 +13,40 @@ from ad_vista_agent.agent.planner import rule_plan
 from ad_vista_agent.schemas import AgentRequest, ConversationAnswer
 
 
+def test_internal_evidence_removal_does_not_leave_empty_parentheses() -> None:
+    from ad_vista_agent.agent.chat import _strip_evidence_ids
+
+    assert _strip_evidence_ids("款式展示（kf_0001_primary, kf_0002_primary）。") == "款式展示。"
+    assert _strip_evidence_ids("产品（待验证）颜色可见。") == "产品（待验证）颜色可见。"
+
+
+def test_new_followup_report_does_not_inherit_an_old_review_approval(tmp_path) -> None:
+    from ad_vista_agent.agent.chat import _record_followup_report
+    from ad_vista_agent.agent.core import _make_state
+    from ad_vista_agent.memory import ConversationStore
+    from ad_vista_agent.runtime import ArtifactStore
+    from ad_vista_agent.schemas import AgentRunStatus
+
+    request = AgentRequest(goal="提取卖点", deliverables=["report"])
+    execution_id = "exec_" + "0" * 32
+    state = _make_state("ingest_test", "asset_test", execution_id, tmp_path / "video.mp4", request, rule_plan(request))
+    state.status = AgentRunStatus.COMPLETED
+    state.approved_confirmations = ["report_review"]
+    store = ArtifactStore(tmp_path)
+    run_dir = store.run_dir("ingest_test")
+    legacy = run_dir / "agent" / "session.json"
+    store.write_json(legacy, {"execution_id": "exec_other", "status": "completed"})
+    conversations = ConversationStore(tmp_path / "memory.sqlite3")
+    result = {"audit_status": "review", "cache_hit": False, "html": "new-report.html"}
+    _record_followup_report(state, result, store, run_dir, conversations)
+    persisted = store.read_json(store.execution_dir(execution_id) / "session.json")
+    assert persisted["status"] == "waiting_confirmation"
+    assert persisted["approved_confirmations"] == []
+    assert persisted["confirmations"] == ["report_review"]
+    assert persisted["deliverables"]["report"] == result
+    assert store.read_json(legacy)["execution_id"] == "exec_other"
+
+
 def test_model_internal_references_expand_to_real_evidence_ids() -> None:
     answer = ConversationAnswer(
         answer="卖点来自已有洞察和关键画面。",

@@ -904,13 +904,28 @@ class WebService:
         ):
             raise ValueError("Invalid conversation session ID")
 
-    def conversations(self, *, user_id: str | None = None) -> list[dict[str, Any]]:
+    def conversations(
+        self, *, user_id: str | None = None, limit: int = 100, offset: int = 0,
+    ) -> list[dict[str, Any]]:
         conversations = self._conversation_store(user_id=self._db_user_id(user_id))
-        rows = conversations.list_sessions(general_only=True)
+        rows = conversations.list_sessions(general_only=True, limit=limit, offset=offset)
         for row in rows:
             if not row.get("title"):
                 row["title"] = fallback_title(conversations.messages(row["session_id"], limit=6))
         return rows
+
+    def conversation_page(
+        self, *, user_id: str | None = None, limit: int = 100, offset: int = 0,
+    ) -> dict[str, Any]:
+        if not 1 <= limit <= 100 or offset < 0:
+            raise ValueError("历史会话 limit 须为 1 至 100，offset 须为非负整数。")
+        rows = self.conversations(user_id=user_id, limit=limit + 1, offset=offset)
+        has_more = len(rows) > limit
+        return {
+            "conversations": rows[:limit],
+            "has_more": has_more,
+            "next_offset": offset + limit if has_more else None,
+        }
 
     def _assert_session_visible(self, session_id: str) -> None:
         if self.database is not None:

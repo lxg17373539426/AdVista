@@ -184,6 +184,12 @@ def test_http_title_routes_and_validation(service, monkeypatch):
         with urlopen(base_url + "/api/conversations", timeout=5) as response:
             assert json.load(response)["conversations"][0]["title"] == "手动名称 <v1.2>"
         assert post("/api/conversations/web_title/title/generate", {})["title"] == "手动名称 <v1.2>"
+        with urlopen(base_url + "/api/conversations?limit=1&offset=1", timeout=5) as response:
+            assert json.load(response) == {"conversations": [], "has_more": False, "next_offset": None}
+        for query in ("limit=0", "offset=-1", "limit=bad"):
+            with pytest.raises(URLError) as invalid_page:
+                urlopen(base_url + "/api/conversations?" + query, timeout=5)
+            assert invalid_page.value.code == 400
         with pytest.raises(URLError) as error:
             post("/api/conversations/web_title/title", {"title": None})
         assert error.value.code == 400
@@ -191,3 +197,28 @@ def test_http_title_routes_and_validation(service, monkeypatch):
         server.shutdown()
         worker.join(timeout=5)
         server.server_close()
+
+
+def test_history_pagination_reaches_sessions_beyond_first_hundred(service):
+    for index in range(103):
+        store = _new_chat(service, f"history_{index:03}")
+        store.set_title(f"history_{index:03}", f"历史对话 {index}")
+    store.delete_session("history_050")
+    first = service.conversation_page()
+    second = service.conversation_page(offset=first["next_offset"])
+    assert len(first["conversations"]) == 100
+    assert first["has_more"] is True
+    assert first["next_offset"] == 100
+    assert len(second["conversations"]) == 2
+    assert second["has_more"] is False
+    assert second["next_offset"] is None
+    ids = [row["session_id"] for page in (first, second) for row in page["conversations"]]
+    assert len(set(ids)) == 102
+    assert "history_050" not in ids
+    assert service.conversation_page(offset=1000)["conversations"] == []
+
+
+@pytest.mark.parametrize("limit,offset", [(0, 0), (101, 0), (1, -1)])
+def test_history_pagination_rejects_invalid_bounds(service, limit, offset):
+    with pytest.raises(ValueError):
+        service.conversation_page(limit=limit, offset=offset)

@@ -16,10 +16,16 @@
     <aside id="sidebar" class="sidebar">
       <div class="brand"><span>A</span><strong>AdVista</strong></div>
       <button id="new-chat" class="new-chat">＋ 新对话</button>
-      <div class="history-scroll">
-      <div class="history-title"><span>普通对话</span><span id="conversation-count">0</span></div>
+      <nav class="history-nav" aria-label="历史会话导航">
+        <button id="history-conversations" type="button" aria-controls="history-scroll">普通对话</button>
+        <button id="history-runs" type="button" aria-controls="history-scroll">视频任务</button>
+        <button id="history-current" type="button" aria-controls="history-scroll" disabled>定位当前</button>
+      </nav>
+      <div id="history-scroll" class="history-scroll" tabindex="0" aria-label="历史会话，可滚动浏览">
+      <div id="conversation-heading" class="history-title"><span>普通对话</span><span id="conversation-count">0</span></div>
       <div id="conversations" class="conversation-list"></div>
-      <div class="history-title"><span>视频任务</span><span id="run-count">0</span></div>
+      <button id="conversations-more" class="history-load-more hidden" type="button">加载更早的普通对话</button>
+      <div id="run-heading" class="history-title"><span>视频任务</span><span id="run-count">0</span></div>
       <div class="history-tools">
         <input id="run-search" class="run-search" type="search" placeholder="搜索标题、视频或目标" aria-label="搜索视频任务">
         <div class="run-filters" role="group" aria-label="筛选视频任务">
@@ -29,6 +35,10 @@
         </div>
       </div>
       <div id="runs" class="run-list"></div>
+      </div>
+      <div class="history-paging" role="group" aria-label="滚动浏览历史会话">
+        <button id="history-newer" type="button" aria-controls="history-scroll" disabled>↑ 较新会话</button>
+        <button id="history-older" type="button" aria-controls="history-scroll" disabled>↓ 更早会话</button>
       </div>
       <p id="history-error" class="history-error hidden" role="alert"></p>
       <div class="connection"><i></i><span id="health">连接中</span></div>

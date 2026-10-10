@@ -22,8 +22,8 @@ def test_task_skills_are_runtime_loadable_and_distinct() -> None:
     report_prompt = task_skill_prompt("report")
     strategy_prompt = task_skill_prompt("strategy")
     creative_prompt = task_skill_prompt("creative")
-    assert "Analysis Report Skill" in report_prompt
-    assert "Marketing Strategy Skill" in strategy_prompt
+    assert "MarketingAnalysis" in report_prompt
+    assert "MarketingStrategy" in strategy_prompt
     assert "Creative Generation Skill" in creative_prompt
     assert len({task_skill_fingerprint(name) for name in ("report", "strategy", "creative")}) == 3
 

@@ -4,7 +4,11 @@ import re
 from collections import Counter
 
 from ad_vista_agent.errors import AnalysisGroundingError
-from ad_vista_agent.schemas import MarketingAnalysis, MarketingDimension
+from ad_vista_agent.schemas import (
+    EpistemicStatus,
+    MarketingAnalysis,
+    MarketingDimension,
+)
 
 SUMMARY_ORDER = (
     MarketingDimension.CREATIVE_STRUCTURE,
@@ -25,11 +29,26 @@ def normalize_inline_citations(analysis: MarketingAnalysis) -> MarketingAnalysis
         for opening, closing in (("（", "）"), ("(", ")"), ("[", "]")):
             claim = claim.replace(opening + closing, "")
             reasoning = reasoning.replace(opening + closing, "")
+        # 移除 ID 后会留下“(, ,)”或“（参考证据：，）”，不应展示给用户。
+        for pattern in (
+            r"[（(]\s*参考(?:语音|画面|证据)?\s*[，,：:、\s]*[）)]",
+            r"[（(][\s，,、;；]*[）)]",
+            r"\[[\s，,、;；]*\]",
+        ):
+            claim = re.sub(pattern, "", claim)
+            reasoning = re.sub(pattern, "", reasoning)
         normalized.append(
             item.model_copy(
                 update={
                     "claim": re.sub(r"[ \t]{2,}", " ", claim).strip(),
                     "reasoning_summary": re.sub(r"[ \t]{2,}", " ", reasoning).strip(),
+                    "epistemic_status": (
+                        EpistemicStatus.INFERRED_FROM_AD
+                        if item.epistemic_status == EpistemicStatus.OBSERVED
+                        and all(ref.startswith("kf_") for ref in item.evidence_refs)
+                        and any(word in claim for word in ("暗示", "推测", "推断"))
+                        else item.epistemic_status
+                    ),
                 }
             )
         )
