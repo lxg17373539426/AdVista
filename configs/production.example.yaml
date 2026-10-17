@@ -47,7 +47,8 @@ report:
 web:
   host: 127.0.0.1
   port: 8080
-  api_token: replace-with-a-long-admin-token
+  require_api_auth: true
+  session_ttl_seconds: 43200
   max_upload_bytes: 1073741824
   analysis_workers: 1
   max_active_jobs: 4

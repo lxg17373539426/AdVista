@@ -1,6 +1,36 @@
-# Replace the hostname before deployment. Caddy obtains and renews HTTPS
-# certificates automatically when DNS points to this server.
-advista.example.com {
+# Set ADVISTA_DOMAIN in /etc/advista/gateway.env. Caddy obtains and renews
+# certificates automatically after DNS and router forwarding are configured.
+{$ADVISTA_DOMAIN} {
     encode gzip
-    reverse_proxy 127.0.0.1:8080
+
+    @admin path /admin /admin.html /api/admin/*
+    respond @admin 404
+
+    request_body {
+        max_size 1026MB
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "same-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        -Server
+    }
+
+    reverse_proxy 127.0.0.1:8080 {
+        transport http {
+            dial_timeout 5s
+            response_header_timeout 20m
+        }
+    }
+
+    log {
+        output file {$ADVISTA_ACCESS_LOG:/var/log/caddy/advista-access.log} {
+            roll_size 20MiB
+            roll_keep 10
+        }
+        format json
+    }
 }

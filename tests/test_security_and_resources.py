@@ -29,6 +29,15 @@ def test_remote_web_host_requires_a_long_api_token() -> None:
     )
     assert configured.web.api_token == "a" * 32
 
+    auth_only = base.model_validate(
+        base.model_dump(mode="json")
+        | {
+            "web": base.web.model_dump(mode="json")
+            | {"host": "0.0.0.0", "require_api_auth": True}
+        }
+    )
+    assert auth_only.web.require_api_auth is True
+
 
 def test_web_media_path_is_limited_to_configured_roots() -> None:
     with TemporaryDirectory() as directory:
@@ -66,6 +75,28 @@ def test_remote_api_requests_are_rejected_without_token() -> None:
         {"web": type("WebStub", (), {"host": "0.0.0.0", "api_token": "b" * 32})()},
     )()
     handler.headers = {}  # type: ignore[assignment]
+    sent: list[tuple[object, object]] = []
+    handler._send_json = lambda value, status=200: sent.append((value, status))
+
+    assert handler._require_api_access(["api", "runs"]) is False
+    assert sent == [({"error": "Unauthorized"}, 401)]
+
+
+def test_local_api_auth_can_be_required_without_shared_token() -> None:
+    handler = object.__new__(_Handler)
+    handler.settings = type(
+        "SettingsStub",
+        (),
+        {
+            "web": type(
+                "WebStub",
+                (),
+                {"host": "127.0.0.1", "api_token": None, "require_api_auth": True},
+            )()
+        },
+    )()
+    handler.headers = {}  # type: ignore[assignment]
+    handler.service = None  # type: ignore[assignment]
     sent: list[tuple[object, object]] = []
     handler._send_json = lambda value, status=200: sent.append((value, status))
 

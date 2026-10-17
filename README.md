@@ -190,6 +190,56 @@ bash scripts/stop_local_stack.sh
 
 当前本地测试服务只绑定 `127.0.0.1`，不会接受公网访问。
 
+### 公开访问网关
+
+如果需要让外部人员使用，但不希望把 9B 模型迁移到云端，可以把整套服务继续运行在本地 GPU 机器，只公开 Caddy 网关：
+
+```text
+外部用户 -- HTTPS --> Caddy -- 127.0.0.1:8080 --> AdVista Web
+                                      └--------> 127.0.0.1:8000 vLLM
+```
+
+不要开放 `8000`、`8080`、`55432` 到公网。复制并修改以下文件：
+
+```bash
+cp configs/production.example.yaml configs/production.yaml
+cp deploy/gateway.env.example /etc/advista/gateway.env
+```
+
+生产配置必须启用数据库用户认证：
+
+```yaml
+web:
+  host: 127.0.0.1
+  port: 8080
+  require_api_auth: true
+```
+
+`require_api_auth` 要求配置 `ADVISTA_DATABASE_URL`，每个外部用户使用独立 API Key。API Key 不写入仓库或 YAML，通过一次性命令创建：
+
+```bash
+advista-agent user-create user@example.com --config configs/production.yaml
+```
+
+命令输出的 `api_key` 只显示一次，应通过安全渠道交给对应用户。浏览器打开公网域名后输入 API Key；程序调用可直接发送：
+
+```bash
+curl -H 'X-API-Key: avk_...' https://advista.example.com/api/health
+```
+
+用户被停用后，已有浏览器会话也会失效：
+
+```bash
+advista-agent user-status user_xxx revoked --config configs/production.yaml
+```
+
+Caddy 反向代理配置位于 `deploy/Caddyfile.example`，它会自动申请 HTTPS、限制上传大小、添加安全响应头，并阻断管理员诊断入口。公网访问有两种方式：
+
+- 有公网 IP：域名解析到本地网络，路由器只转发 TCP `80/443` 到 Caddy；不要转发 `8000/8080/55432`。
+- 没有公网 IP：使用 Cloudflare Tunnel、Tailscale Funnel 或同类出站隧道，将域名只接到本机 Caddy。
+
+公网入口服务示例位于 `deploy/advista-gateway.service.example`。长任务超时已在 Caddy 中设置为 20 分钟，但任务本身仍通过异步 Job API 执行。外部用户共享本地 GPU 的处理队列，生产环境应通过 `max_active_jobs`、`max_active_jobs_per_user`、`api_requests_per_minute` 和上传大小限制控制资源。
+
 普通对话首轮回答及视频任务完成后，页面异步请求本地模型生成简短的内容摘要标题；模型不可用时使用用户问题提取标题，不影响回答显示。普通对话和视频任务分别保存在侧栏，每次视频执行均可独立打开。
 
 点击侧栏会话旁或顶部的 `✎` 可重命名，标题上限为 80 个字符。手动名称会保存，刷新页面或继续聊天后仍保留，后续自动摘要不会覆盖。视频标题和原始任务目标分别显示，改名不会改变分析目标。

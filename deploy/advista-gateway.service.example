@@ -1,0 +1,22 @@
+[Unit]
+Description=AdVista Public HTTPS Gateway
+After=network-online.target advista.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=caddy
+Group=caddy
+EnvironmentFile=/etc/advista/gateway.env
+ExecStart=/usr/bin/caddy run --environ --config /opt/advista-agent/deploy/Caddyfile.example
+ExecReload=/usr/bin/caddy reload --config /opt/advista-agent/deploy/Caddyfile.example --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+PrivateTmp=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

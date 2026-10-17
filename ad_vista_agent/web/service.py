@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -46,6 +48,8 @@ class WebService:
         self.context_repository = None
         self.diagnostic_repository = None
         self.system_user_id = None
+        self._web_sessions: dict[str, tuple[float, dict[str, str]]] = {}
+        self._web_sessions_lock = threading.RLock()
         if settings.database.configured:
             from ad_vista_agent.database import (
                 ContextRepository,
@@ -64,6 +68,8 @@ class WebService:
             self.context_repository = ContextRepository(self.database)
             self.diagnostic_repository = DiagnosticRepository(self.database)
             self.system_user_id = self.request_repository.ensure_system_user().user_id
+        if settings.web.require_api_auth and self.user_repository is None:
+            raise ValueError("web.require_api_auth requires ADVISTA_DATABASE_URL")
         self.store = ArtifactStore(settings.paths.output_root)
         self.executor = ThreadPoolExecutor(max_workers=settings.web.analysis_workers)
         self.jobs: dict[str, dict[str, Any]] = {}
@@ -156,6 +162,40 @@ class WebService:
         if user is None:
             return None
         return {"user_id": user.user_id, "username": user.username, "role": user.role}
+
+    def create_web_session(self, api_key: str) -> tuple[str, dict[str, str]] | None:
+        identity = self.authenticate_api_key(api_key)
+        if identity is None:
+            return None
+        token = secrets.token_urlsafe(32)
+        expires_at = time.time() + self.settings.web.session_ttl_seconds
+        with self._web_sessions_lock:
+            self._web_sessions[token] = (expires_at, identity)
+        return token, identity
+
+    def authenticate_web_session(self, token: str) -> dict[str, str] | None:
+        if not token:
+            return None
+        now = time.time()
+        with self._web_sessions_lock:
+            session = self._web_sessions.get(token)
+            if session is None:
+                return None
+            expires_at, identity = session
+            if expires_at <= now:
+                self._web_sessions.pop(token, None)
+                return None
+            if self.user_repository is None:
+                return None
+            user = self.user_repository.active_user(identity["user_id"])
+            if user is None:
+                self._web_sessions.pop(token, None)
+                return None
+            return identity
+
+    def delete_web_session(self, token: str) -> None:
+        with self._web_sessions_lock:
+            self._web_sessions.pop(token, None)
 
     def _db_user_id(self, user_id: str | None) -> str | None:
         return user_id or self.system_user_id

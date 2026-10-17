@@ -64,6 +64,16 @@ class UserRepository:
             session.expunge(user)
             return user
 
+    def active_user(self, user_id: str) -> User | None:
+        with self.database.session() as session:
+            user = session.scalar(
+                select(User).where(User.user_id == user_id, User.status == "active")
+            )
+            if user is None:
+                return None
+            session.expunge(user)
+            return user
+
     def delete_user(self, user_id: str) -> dict[str, list[str]]:
         if user_id == "system":
             raise ValueError("The system user cannot be deleted")

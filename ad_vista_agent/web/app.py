@@ -9,6 +9,7 @@ import signal
 import threading
 import time
 from http import HTTPStatus
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import FrameType
@@ -156,9 +157,19 @@ class _Handler(BaseHTTPRequestHandler):
     static_root = Path(__file__).parent / "static"
     _rate_lock = threading.RLock()
     _rate_windows: ClassVar[dict[str, list[float]]] = {}
+    session_cookie = "advista_session"
 
     def _identity(self) -> dict[str, str] | None:
         return getattr(self, "identity", None)
+
+    def _session_token(self) -> str:
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+        except CookieError:
+            return ""
+        value = cookie.get(self.session_cookie)
+        return value.value if value is not None else ""
 
     def _require_admin(self) -> bool:
         identity = self._identity()
@@ -191,6 +202,30 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(payload)
+
+    def _send_session(self, token: str, identity: dict[str, str]) -> None:
+        payload = json.dumps(
+            {"status": "ok", "user": identity}, ensure_ascii=False
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header(
+            "Set-Cookie",
+            f"{self.session_cookie}={token}; Path=/; Max-Age={self.settings.web.session_ttl_seconds}; HttpOnly; Secure; SameSite=Strict",
+        )
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _clear_session(self) -> None:
+        self.send_response(204)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header(
+            "Set-Cookie",
+            f"{self.session_cookie}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict",
+        )
+        self.end_headers()
 
     def _send_file(self, path: Path, content_type: str | None = None, attachment: bool = False) -> None:
         size = path.stat().st_size
@@ -225,13 +260,20 @@ class _Handler(BaseHTTPRequestHandler):
             supplied = authorization[7:]
         service = getattr(self, "service", None)
         identity = service.authenticate_api_key(supplied) if service is not None else None
+        if identity is None and service is not None:
+            identity = service.authenticate_web_session(self._session_token())
         if identity is not None:
             self.identity = identity
             subject = identity.get("user_id", "unknown")
         elif configured and secrets.compare_digest(supplied, configured):
             self.identity = {"user_id": "system", "username": "system", "role": "admin"}
             subject = "system"
-        elif local and not configured and not supplied:
+        elif (
+            local
+            and not configured
+            and not getattr(self.settings.web, "require_api_auth", False)
+            and not supplied
+        ):
             subject = "anonymous-local"
         else:
             self._send_json({"error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
@@ -285,6 +327,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send_json(
                     {"service": "advista-agent-web", **self.service.health()}
                 )
+            if parts == ["api", "auth", "me"]:
+                return self._send_json({"user": self._identity()})
             if parts == ["api", "runs"]:
                 identity = self._identity()
                 return self._send_json({"runs": self.service.runs(
@@ -428,6 +472,22 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             parts, _ = self._route()
+            if parts == ["api", "auth", "login"]:
+                subject = f"login:{self.client_address[0]}"
+                if not self._within_rate_limit(subject):
+                    return self._send_json(
+                        {"error": "Rate limit exceeded"}, HTTPStatus.TOO_MANY_REQUESTS
+                    )
+                body = _read_json(self)
+                session = self.service.create_web_session(str(body.get("api_key", "")))
+                if session is None:
+                    return self._send_json(
+                        {"error": "Invalid API key"}, HTTPStatus.UNAUTHORIZED
+                    )
+                return self._send_session(*session)
+            if parts == ["api", "auth", "logout"]:
+                self.service.delete_web_session(self._session_token())
+                return self._clear_session()
             if not self._require_api_access(parts):
                 return
             if parts == ["api", "uploads"]:
@@ -602,6 +662,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(500, "服务暂时无法完成请求，请稍后重试。")
 
     def do_DELETE(self) -> None:
+        parts: list[str] = []
         try:
             parts, _ = self._route()
             if not self._require_api_access(parts):
