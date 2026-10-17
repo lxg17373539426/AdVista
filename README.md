@@ -6,13 +6,9 @@ AdVista 是一个面向广告团队、品牌市场团队和内容创意团队的
 
 它不只回答「视频讲了什么」，还会标明哪些内容来自直接证据、哪些属于画面观察或营销推断，以及哪些判断仍然需要人工验证。
 
-<p align="center">
-  <img src="docs/assets/advista-demo.gif" alt="AdVista 产品演示" width="800">
-</p>
+**[观看 51 秒真实操作演示](docs/assets/advista-real-demo.mp4)**
 
-<p align="center">
-  <a href="docs/assets/advista-demo.mp4">观看 90 秒完整产品演示</a>
-</p>
+演示直接录制自 AdVista 工作台，包含公开广告文件选择、任务配置、真实报告、证据展开以及基于当前视频的追问。演示未使用静态幻灯片替代产品操作。
 
 ## 三个核心亮点
 
@@ -60,9 +56,7 @@ AdVista 是一个面向广告团队、品牌市场团队和内容创意团队的
 输出报告、策略或广告创意
 ```
 
-同一份证据可以继续用于不同营销任务：
-
-![AdVista 营销交付物](docs/assets/strategy-creative.png)
+同一份证据可以继续用于卖点报告、营销策略和广告创意等不同任务。
 
 > AdVista 的输出用于辅助分析和创作。广告主张、功效、受众属性和转化效果仍需结合实际业务进行人工核验和测试。
 

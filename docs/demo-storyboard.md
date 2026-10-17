@@ -130,9 +130,9 @@
 README 中使用：
 
 ```markdown
-![AdVista 产品演示](docs/assets/advista-demo.gif)
+视频演示不在 README 内自动循环播放，使用明确的链接打开：
 
-[观看 90 秒完整产品演示](docs/assets/advista-demo.mp4)
+[观看真实产品演示](docs/assets/advista-real-demo.mp4)
 ```
 
 ## 成片检查

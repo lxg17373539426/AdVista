@@ -18,7 +18,7 @@ AdVista 是一个面向广告团队、品牌市场团队和内容创意团队的
 - 哪些判断仍然需要人工验证。
 
 <!-- 发布前替换为脱敏产品演示 WebP 或 GIF。 -->
-![AdVista 产品演示](assets/advista-demo.gif)
+[观看真实产品演示](assets/advista-real-demo.mp4)
 
 ## 三个核心亮点
 
@@ -80,7 +80,6 @@ AdVista 是一个面向广告团队、品牌市场团队和内容创意团队的
 | --- | --- | --- |
 | `assets/workbench.png` | 工作台、视频上传和任务选择 | 使用入口简单，支持多种任务 |
 | `assets/evidence-report.png` | 洞察、证据引用、时间段和关键帧 | 结果不是黑盒文本 |
-| `assets/strategy-creative.png` | 策略、Hook、脚本和分镜 | 结果可以继续用于营销工作 |
 
 ## 适合谁使用
 
